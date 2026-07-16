@@ -1,0 +1,110 @@
+.app {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+  text-align: left;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.row input,
+.row select {
+  flex: 1;
+  padding: 8px;
+  font-size: 14px;
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid var(--border, #333);
+  border-radius: 8px;
+  padding: 12px 16px;
+  cursor: pointer;
+}
+
+.card p {
+  margin: 4px 0 0;
+  opacity: 0.7;
+  font-size: 13px;
+}
+
+.comment {
+  border: 1px solid var(--border, #333);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.comment .ts {
+  float: right;
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+.comment p {
+  margin: 6px 0 0;
+}
+
+.identity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  float: right;
+  padding: 4px 10px;
+  border: 1px solid var(--border, #333);
+  border-radius: 999px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.presence-roster {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  opacity: 0.8;
+  margin: 8px 0;
+}
+
+.presence-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border, #333);
+  border-radius: 999px;
+}
+
+.task-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.viewer-dots {
+  display: inline-flex;
+  gap: 2px;
+}
