@@ -17,7 +17,6 @@ const FLASH_DURATION_MS = 1500
 export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack: () => void }) {
   const [project, setProject] = useState<Project | null>(null)
   const [tasks, setTasks] = useState<Task[]>([])
-  const [search, setSearch] = useState('')
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [showNewTask, setShowNewTask] = useState(false)
   const [highlighted, setHighlighted] = useState<Set<string>>(new Set())
@@ -75,17 +74,12 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   }
 
   const blockedCount = useMemo(() => countBlocked(tasks), [tasks])
-  const visibleTasks = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return tasks
-    return tasks.filter((t) => t.title.toLowerCase().includes(q))
-  }, [tasks, search])
   const viewers = othersViewing(presence)
 
   if (!project) return <p>Loading…</p>
 
   return (
-    <div>
+    <div className="board-page">
       <div className="board-header">
         <div className="board-header-left">
           <button className="breadcrumb-link" onClick={onBack}>
@@ -132,19 +126,10 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
         </button>
       </div>
 
-      <div className="board-toolbar">
-        <input
-          className="search-input"
-          placeholder="Search tasks…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-      </div>
-
       {banner && <p className="error-banner">{banner}</p>}
 
       <KanbanBoard
-        tasks={visibleTasks}
+        tasks={tasks}
         presence={presence}
         highlighted={highlighted}
         onMoveTask={handleMoveTask}

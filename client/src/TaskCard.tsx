@@ -57,7 +57,7 @@ export function TaskCard({
         <div className="task-card-bottom">
           <div className="avatar-stack">
             {task.assignedTo.map((name) => (
-              <Avatar key={name} name={name} size={22} />
+              <Avatar key={name} name={name} size={18} />
             ))}
           </div>
         </div>

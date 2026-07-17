@@ -79,7 +79,7 @@ export function NewTaskForm({
         />
 
         <div className="new-task-pill-row">
-          <span className="status-select status-todo" style={{ pointerEvents: 'none' }}>
+          <span className="status-select status-todo status-fixed" style={{ pointerEvents: 'none' }}>
             {STATUS_LABEL.todo}
           </span>
           <select

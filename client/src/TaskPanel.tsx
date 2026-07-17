@@ -125,6 +125,16 @@ export function TaskPanel({
     refreshComments()
   }
 
+  async function handleDeleteTask() {
+    if (!confirm('Delete this task? This cannot be undone.')) return
+    try {
+      await api.deleteTask(taskId)
+      onClose()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to delete task')
+    }
+  }
+
   const previewTags = tags
     .split(',')
     .map((t) => t.trim())
@@ -148,9 +158,14 @@ export function TaskPanel({
               ))}
             </span>
           )}
-          <button type="button" className="panel-close" onClick={onClose} aria-label="Close">
-            &times;
-          </button>
+          <div className="panel-header-actions">
+            <button type="button" className="delete-btn" onClick={handleDeleteTask}>
+              Delete
+            </button>
+            <button type="button" className="panel-close" onClick={onClose} aria-label="Close">
+              &times;
+            </button>
+          </div>
         </div>
 
         {error && <p className="error-banner">{error}</p>}
