@@ -1,22 +1,49 @@
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  --text: #6f6a61;
+  --text-h: #201e1a;
+  --text-label: #4a463f;
+  --text-faint: #9c978e;
+  --bg: #faf9f6;
+  --surface: #fff;
+  --bg-well: #f1efe9;
+  --border: #e3e0d8;
+  --border-soft: #eae7df;
+  --code-bg: #f1efe9;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --accent: #4655c4;
+  --accent-hover: #3a48a8;
+  --accent-bg: rgba(70, 85, 196, 0.1);
+  --accent-border: rgba(70, 85, 196, 0.35);
+
+  --status-todo: #a8a399;
+  --status-todo-bg: #edebe4;
+  --status-in_progress: #4655c4;
+  --status-in_progress-bg: #e7e9f8;
+  --status-done: #2e9e63;
+  --status-done-bg: #e4f0e6;
+  --status-done-text: #256d43;
+
+  --priority-high: #8a5a08;
+  --priority-high-bg: #f8eeda;
+  --priority-medium: #8a5a08;
+  --priority-medium-bg: #f8eeda;
+  --priority-low: #6f6a61;
+  --priority-low-bg: #edebe4;
+
+  --danger: #ae3a2c;
+  --danger-bg: #fae6e2;
+
+  --social-bg: rgba(241, 239, 233, 0.6);
+  --shadow: 0 1px 3px rgba(32, 30, 26, 0.06);
+  --shadow-hover: 0 4px 12px rgba(32, 30, 26, 0.08);
+  --shadow-btn: 0 2px 6px rgba(70, 85, 196, 0.28);
+
+  --sans: 'Instrument Sans', 'Helvetica Neue', system-ui, sans-serif;
+  --heading: var(--sans);
   --mono: ui-monospace, Consolas, monospace;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
+  font: 16px/145% var(--sans);
+  letter-spacing: 0.1px;
   color-scheme: light dark;
   color: var(--text);
   background: var(--bg);
@@ -24,38 +51,124 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
+    --text: #a39d8e;
+    --text-h: #f2f0ea;
+    --text-label: #cec8bb;
+    --text-faint: #6f6a61;
+    --bg: #1b1a17;
+    --surface: #232220;
+    --bg-well: #28261f;
+    --border: #38352c;
+    --border-soft: #322f27;
+    --code-bg: #28261f;
 
-  #social .button-icon {
-    filter: invert(1) brightness(2);
+    --accent: #8b96e8;
+    --accent-hover: #a3adef;
+    --accent-bg: rgba(139, 150, 232, 0.16);
+    --accent-border: rgba(139, 150, 232, 0.45);
+
+    --status-todo: #9a958a;
+    --status-todo-bg: #322f27;
+    --status-in_progress: #8b96e8;
+    --status-in_progress-bg: #262a42;
+    --status-done: #4abe85;
+    --status-done-bg: #16281f;
+    --status-done-text: #4abe85;
+
+    --priority-high: #e8b04a;
+    --priority-high-bg: #362a12;
+    --priority-medium: #e8b04a;
+    --priority-medium-bg: #362a12;
+    --priority-low: #a39d8e;
+    --priority-low-bg: #2a2820;
+
+    --danger: #f0857a;
+    --danger-bg: #3a1d18;
+
+    --social-bg: rgba(50, 47, 39, 0.6);
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    --shadow-hover: 0 4px 14px rgba(0, 0, 0, 0.4);
+    --shadow-btn: 0 2px 8px rgba(0, 0, 0, 0.4);
   }
 }
 
+/* Manual theme toggle overrides the OS preference either direction. */
+:root[data-theme='dark'] {
+  --text: #a39d8e;
+  --text-h: #f2f0ea;
+  --text-label: #cec8bb;
+  --text-faint: #6f6a61;
+  --bg: #1b1a17;
+  --surface: #232220;
+  --bg-well: #28261f;
+  --border: #38352c;
+  --border-soft: #322f27;
+  --code-bg: #28261f;
+  --accent: #8b96e8;
+  --accent-hover: #a3adef;
+  --accent-bg: rgba(139, 150, 232, 0.16);
+  --accent-border: rgba(139, 150, 232, 0.45);
+  --status-todo: #9a958a;
+  --status-todo-bg: #322f27;
+  --status-in_progress: #8b96e8;
+  --status-in_progress-bg: #262a42;
+  --status-done: #4abe85;
+  --status-done-bg: #16281f;
+  --status-done-text: #4abe85;
+  --priority-high: #e8b04a;
+  --priority-high-bg: #362a12;
+  --priority-medium: #e8b04a;
+  --priority-medium-bg: #362a12;
+  --priority-low: #a39d8e;
+  --priority-low-bg: #2a2820;
+  --danger: #f0857a;
+  --danger-bg: #3a1d18;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --shadow-hover: 0 4px 14px rgba(0, 0, 0, 0.4);
+  --shadow-btn: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+:root[data-theme='light'] {
+  --text: #6f6a61;
+  --text-h: #201e1a;
+  --text-label: #4a463f;
+  --text-faint: #9c978e;
+  --bg: #faf9f6;
+  --surface: #fff;
+  --bg-well: #f1efe9;
+  --border: #e3e0d8;
+  --border-soft: #eae7df;
+  --code-bg: #f1efe9;
+  --accent: #4655c4;
+  --accent-hover: #3a48a8;
+  --accent-bg: rgba(70, 85, 196, 0.1);
+  --accent-border: rgba(70, 85, 196, 0.35);
+  --status-todo: #a8a399;
+  --status-todo-bg: #edebe4;
+  --status-in_progress: #4655c4;
+  --status-in_progress-bg: #e7e9f8;
+  --status-done: #2e9e63;
+  --status-done-bg: #e4f0e6;
+  --status-done-text: #256d43;
+  --priority-high: #8a5a08;
+  --priority-high-bg: #f8eeda;
+  --priority-medium: #8a5a08;
+  --priority-medium-bg: #f8eeda;
+  --priority-low: #6f6a61;
+  --priority-low-bg: #edebe4;
+  --danger: #ae3a2c;
+  --danger-bg: #fae6e2;
+  --shadow: 0 1px 3px rgba(32, 30, 26, 0.06);
+  --shadow-hover: 0 4px 12px rgba(32, 30, 26, 0.08);
+  --shadow-btn: 0 2px 6px rgba(70, 85, 196, 0.28);
+}
+
 #root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
+  width: 100%;
   min-height: 100svh;
   display: flex;
   flex-direction: column;
@@ -67,30 +180,32 @@ body {
 }
 
 h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
+h2,
+h3 {
+  font-family: var(--sans);
+  font-weight: 600;
   color: var(--text-h);
+  margin: 0;
 }
 
 h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
 }
+
 h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
+  font-size: 18px;
 }
+
+h3 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text);
+}
+
 p {
   margin: 0;
 }

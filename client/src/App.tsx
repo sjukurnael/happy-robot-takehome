@@ -1,45 +1,36 @@
 import { useEffect, useState } from 'react'
 import { ProjectList } from './ProjectList'
 import { ProjectDetail } from './ProjectDetail'
-import { TaskDetail } from './TaskDetail'
 import { IdentityBadge } from './IdentityBadge'
+import { ThemeToggle } from './ThemeToggle'
 import { live } from './live'
 import './App.css'
 
-type View =
-  | { name: 'projects' }
-  | { name: 'project'; projectId: string }
-  | { name: 'task'; projectId: string; taskId: string }
+type View = { name: 'projects' } | { name: 'project'; projectId: string }
 
 function App() {
   const [view, setView] = useState<View>({ name: 'projects' })
 
-  // Single source of truth for "where is this client looking" — every
-  // view transition tells the server, which is all presence needs.
+  // ProjectDetail owns presence viewing state while it's mounted (including
+  // which task's panel is open); this only needs to clear it when we leave
+  // the project entirely.
   useEffect(() => {
-    if (view.name === 'project') live.setViewing(view.projectId)
-    else if (view.name === 'task') live.setViewing(view.projectId, view.taskId)
-    else live.setViewing('')
+    if (view.name !== 'project') live.setViewing('')
   }, [view])
 
   return (
     <div className="app">
-      <IdentityBadge />
       {view.name === 'projects' && (
-        <ProjectList onOpen={(projectId) => setView({ name: 'project', projectId })} />
+        <>
+          <div className="topbar">
+            <ThemeToggle />
+            <IdentityBadge />
+          </div>
+          <ProjectList onOpen={(projectId) => setView({ name: 'project', projectId })} />
+        </>
       )}
       {view.name === 'project' && (
-        <ProjectDetail
-          projectId={view.projectId}
-          onBack={() => setView({ name: 'projects' })}
-          onOpenTask={(taskId) => setView({ name: 'task', projectId: view.projectId, taskId })}
-        />
-      )}
-      {view.name === 'task' && (
-        <TaskDetail
-          taskId={view.taskId}
-          onBack={() => setView({ name: 'project', projectId: view.projectId })}
-        />
+        <ProjectDetail projectId={view.projectId} onBack={() => setView({ name: 'projects' })} />
       )}
     </div>
   )

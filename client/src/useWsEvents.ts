@@ -29,3 +29,25 @@ export function usePresence(projectId: string | null): PresenceEntry[] {
 
   return roster
 }
+
+export function useConnectionStatus(): boolean {
+  const [connected, setConnected] = useState(live.connected)
+  useEffect(() => live.subscribeConnection(setConnected), [])
+  return connected
+}
+
+// Accumulates the latest known presence roster per project from every
+// presence.updated event seen, regardless of which project this client is
+// currently viewing — the hub broadcasts these to all connected clients, so
+// this works without a dedicated "list viewers of project X" endpoint.
+export function useAllProjectsPresence(): Record<string, PresenceEntry[]> {
+  const [byProject, setByProject] = useState<Record<string, PresenceEntry[]>>({})
+
+  useWsEvents((evt) => {
+    if (evt.type === 'presence.updated' && evt.projectId) {
+      setByProject((prev) => ({ ...prev, [evt.projectId!]: evt.presence ?? [] }))
+    }
+  })
+
+  return byProject
+}

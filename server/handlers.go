@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -20,6 +21,25 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeStoreError maps a store/validation error to the appropriate HTTP
+// status: 404 for missing resources, 409 for a blocked status transition,
+// 400 for malformed dependency references, 500 otherwise.
+func writeStoreError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrBlockedByDependency):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrSelfDependency),
+		errors.Is(err, ErrCyclicDependency),
+		errors.Is(err, ErrDependencyNotFound),
+		errors.Is(err, ErrCrossProjectDependency):
+		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
 }
 
 // --- Projects ---
@@ -107,7 +127,11 @@ func (a *API) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t.ProjectID = projectID
-	created := a.store.CreateTask(&t)
+	created, err := a.store.CreateTask(&t)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	a.hub.Broadcast(Event{Type: "task.created", ProjectID: projectID, ResourceID: created.ID})
 	writeJSON(w, http.StatusCreated, created)
 }
@@ -135,7 +159,20 @@ func (a *API) updateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	t, ok := a.store.UpdateTask(id, func(t *Task) {
+	t, err := a.store.UpdateTask(id, func(t *Task, tasks map[string]*Task) error {
+		deps := t.Dependencies
+		if patch.Dependencies != nil {
+			if err := validateDependencies(t.ID, t.ProjectID, patch.Dependencies, tasks); err != nil {
+				return err
+			}
+			deps = patch.Dependencies
+		}
+		if patch.Status != nil && *patch.Status == StatusDone {
+			if err := validateCanComplete(deps, tasks); err != nil {
+				return err
+			}
+		}
+
 		if patch.Title != nil {
 			t.Title = *patch.Title
 		}
@@ -151,9 +188,10 @@ func (a *API) updateTask(w http.ResponseWriter, r *http.Request) {
 		if patch.Dependencies != nil {
 			t.Dependencies = patch.Dependencies
 		}
+		return nil
 	})
-	if !ok {
-		writeError(w, http.StatusNotFound, "task not found")
+	if err != nil {
+		writeStoreError(w, err)
 		return
 	}
 	a.hub.Broadcast(Event{Type: "task.updated", ProjectID: t.ProjectID, ResourceID: t.ID})
@@ -162,10 +200,13 @@ func (a *API) updateTask(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) deleteTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "taskID")
-	t, ok := a.store.DeleteTask(id)
+	t, affected, ok := a.store.DeleteTask(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "task not found")
 		return
+	}
+	for _, affectedID := range affected {
+		a.hub.Broadcast(Event{Type: "task.updated", ProjectID: t.ProjectID, ResourceID: affectedID})
 	}
 	a.hub.Broadcast(Event{Type: "task.deleted", ProjectID: t.ProjectID, ResourceID: id})
 	w.WriteHeader(http.StatusNoContent)

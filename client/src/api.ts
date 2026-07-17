@@ -1,5 +1,16 @@
 import type { Comment, Project, Task, TaskStatus } from './types'
 
+// Carries the HTTP status alongside the server's error message so callers
+// can distinguish e.g. a 409 (blocked by dependency) from a 400 (malformed
+// request) without re-parsing the message.
+export class ApiError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -7,7 +18,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const body = await res.text()
-    throw new Error(`${res.status} ${res.statusText}: ${body}`)
+    let message = body
+    try {
+      const parsed = JSON.parse(body)
+      if (typeof parsed?.error === 'string') message = parsed.error
+    } catch {
+      // body wasn't JSON — fall back to raw text
+    }
+    throw new ApiError(res.status, message)
   }
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>

@@ -38,12 +38,22 @@ export function renameIdentity(name: string): Identity {
   return identity
 }
 
-// Deterministic color from clientId so two collaborators who happen to
-// share a display name are still visually distinguishable.
+// Deterministic color from any string (clientId, assignee name, ...) so two
+// collaborators who happen to share a display name are still visually
+// distinguishable, and so a given name always gets the same avatar color.
 export function colorForClientId(clientId: string): string {
   let hash = 0
   for (let i = 0; i < clientId.length; i++) {
     hash = (hash * 31 + clientId.charCodeAt(i)) >>> 0
   }
   return `hsl(${hash % 360}, 65%, 45%)`
+}
+
+// Up to 2 initials from a display name/email, e.g. "Maya Torres" -> "MT",
+// "ana@co.com" -> "A".
+export function initialsFor(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return '?'
+  if (parts.length === 1) return parts[0][0].toUpperCase()
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }

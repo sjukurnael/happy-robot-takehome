@@ -2,6 +2,9 @@ import { getIdentity } from './identity'
 import type { WsEvent } from './types'
 
 type Listener = (evt: WsEvent) => void
+type ConnectionListener = (connected: boolean) => void
+
+const RECONNECT_DELAY_MS = 2000
 
 // Single shared WebSocket for the whole app. Components used to each
 // open their own connection via useWsEvents, which meant N components
@@ -11,6 +14,9 @@ type Listener = (evt: WsEvent) => void
 class LiveConnection {
   private ws: WebSocket | null = null
   private listeners = new Set<Listener>()
+  private connectionListeners = new Set<ConnectionListener>()
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  connected = false
   readonly me = getIdentity()
 
   private connect() {
@@ -18,6 +24,10 @@ class LiveConnection {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const params = new URLSearchParams({ clientId: this.me.clientId, name: this.me.name })
     const ws = new WebSocket(`${protocol}//${location.host}/ws?${params}`)
+    ws.onopen = () => {
+      this.connected = true
+      this.connectionListeners.forEach((l) => l(true))
+    }
     ws.onmessage = (msg) => {
       let evt: WsEvent
       try {
@@ -29,6 +39,14 @@ class LiveConnection {
     }
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
+      this.connected = false
+      this.connectionListeners.forEach((l) => l(false))
+      if (!this.reconnectTimer) {
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = null
+          this.connect()
+        }, RECONNECT_DELAY_MS)
+      }
     }
     this.ws = ws
   }
@@ -37,6 +55,14 @@ class LiveConnection {
     this.connect()
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
+  }
+
+  // Calls back immediately with the current state, then on every change.
+  subscribeConnection(listener: ConnectionListener): () => void {
+    this.connect()
+    listener(this.connected)
+    this.connectionListeners.add(listener)
+    return () => this.connectionListeners.delete(listener)
   }
 
   setViewing(projectId: string, taskId?: string) {

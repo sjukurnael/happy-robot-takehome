@@ -1,12 +1,15 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+var ErrNotFound = errors.New("not found")
 
 // Store is a naive in-memory store guarded by a single mutex.
 // This is intentionally the simplest thing that works — it will be
@@ -93,17 +96,38 @@ func (s *Store) DeleteProject(id string) bool {
 
 // --- Tasks ---
 
-func (s *Store) CreateTask(t *Task) *Task {
+func (s *Store) CreateTask(t *Task) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t.ID = newID("task")
+	id := newID("task")
+	// A brand-new task can't be anyone's dependency yet, so no cycle is
+	// possible on creation — this still checks existence/same-project/self-ref.
+	if err := validateDependencies(id, t.ProjectID, t.Dependencies, s.tasks); err != nil {
+		return nil, err
+	}
+	t.ID = id
 	t.CreatedAt = time.Now().UTC()
 	t.UpdatedAt = t.CreatedAt
 	if t.Status == "" {
 		t.Status = StatusTodo
 	}
+	// Normalize nil slices/maps to empty so the JSON contract is always
+	// `[]`/`{}`, never `null` — one less null-check every API consumer
+	// would otherwise need.
+	if t.Dependencies == nil {
+		t.Dependencies = []string{}
+	}
+	if t.AssignedTo == nil {
+		t.AssignedTo = []string{}
+	}
+	if t.Configuration.Tags == nil {
+		t.Configuration.Tags = []string{}
+	}
+	if t.Configuration.CustomFields == nil {
+		t.Configuration.CustomFields = map[string]any{}
+	}
 	s.tasks[t.ID] = t
-	return t
+	return t, nil
 }
 
 func (s *Store) ListTasksByProject(projectID string) []*Task {
@@ -125,24 +149,36 @@ func (s *Store) GetTask(id string) (*Task, bool) {
 	return t, ok
 }
 
-func (s *Store) UpdateTask(id string, fn func(*Task)) (*Task, bool) {
+// UpdateTask applies fn to the task under the store's lock so that
+// validation against other tasks (e.g. dependency cycle/completion checks)
+// and the mutation itself are atomic — fn is given the full tasks map to
+// validate against, but must not mutate anything other than t. If fn
+// returns an error, the mutation is discarded and UpdatedAt is left
+// untouched.
+func (s *Store) UpdateTask(id string, fn func(t *Task, tasks map[string]*Task) error) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.tasks[id]
 	if !ok {
-		return nil, false
+		return nil, ErrNotFound
 	}
-	fn(t)
+	if err := fn(t, s.tasks); err != nil {
+		return nil, err
+	}
 	t.UpdatedAt = time.Now().UTC()
-	return t, true
+	return t, nil
 }
 
-func (s *Store) DeleteTask(id string) (*Task, bool) {
+// DeleteTask removes a task and its comments, and strips the deleted ID out
+// of any other task's Dependencies list. It returns the deleted task and the
+// IDs of any tasks whose dependencies were modified, so callers can notify
+// clients about both.
+func (s *Store) DeleteTask(id string) (*Task, []string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.tasks[id]
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
 	delete(s.tasks, id)
 	for cid, c := range s.comments {
@@ -150,7 +186,18 @@ func (s *Store) DeleteTask(id string) (*Task, bool) {
 			delete(s.comments, cid)
 		}
 	}
-	return t, true
+	var affected []string
+	for tid, other := range s.tasks {
+		for i, depID := range other.Dependencies {
+			if depID == id {
+				other.Dependencies = append(other.Dependencies[:i], other.Dependencies[i+1:]...)
+				other.UpdatedAt = time.Now().UTC()
+				affected = append(affected, tid)
+				break
+			}
+		}
+	}
+	return t, affected, true
 }
 
 // --- Comments ---

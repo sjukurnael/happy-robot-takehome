@@ -1,26 +1,29 @@
-import { useEffect, useState } from 'react'
-import { api } from './api'
+import { useEffect, useMemo, useState } from 'react'
+import { api, ApiError } from './api'
 import type { Project, Task, TaskStatus } from './types'
-import { useWsEvents, usePresence } from './useWsEvents'
-import { PresenceRoster, viewersOfTask } from './Presence'
-import { colorForClientId } from './identity'
+import { useWsEvents, usePresence, useConnectionStatus } from './useWsEvents'
+import { othersViewing } from './Presence'
+import { Avatar } from './Avatar'
+import { KanbanBoard } from './KanbanBoard'
+import { NewTaskForm } from './NewTaskForm'
+import { TaskPanel } from './TaskPanel'
+import { IdentityBadge } from './IdentityBadge'
+import { ThemeToggle } from './ThemeToggle'
+import { countBlocked } from './taskUtils'
+import { live } from './live'
 
-const STATUSES: TaskStatus[] = ['todo', 'in_progress', 'done']
+const FLASH_DURATION_MS = 1500
 
-export function ProjectDetail({
-  projectId,
-  onBack,
-  onOpenTask,
-}: {
-  projectId: string
-  onBack: () => void
-  onOpenTask: (taskId: string) => void
-}) {
+export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack: () => void }) {
   const [project, setProject] = useState<Project | null>(null)
   const [tasks, setTasks] = useState<Task[]>([])
-  const [title, setTitle] = useState('')
-  const [priority, setPriority] = useState('medium')
+  const [search, setSearch] = useState('')
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
+  const [showNewTask, setShowNewTask] = useState(false)
+  const [highlighted, setHighlighted] = useState<Set<string>>(new Set())
+  const [banner, setBanner] = useState<string | null>(null)
   const presence = usePresence(projectId)
+  const connected = useConnectionStatus()
 
   const refresh = () => {
     api.getProject(projectId).then(setProject)
@@ -32,82 +35,134 @@ export function ProjectDetail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId])
 
+  // Tell the server where we're looking so presence/viewer indicators stay
+  // accurate as the user opens/closes the task panel.
+  useEffect(() => {
+    live.setViewing(projectId, selectedTaskId ?? undefined)
+  }, [projectId, selectedTaskId])
+
   useWsEvents((evt) => {
     if (evt.projectId !== projectId) return
     if (evt.type.startsWith('task.') || evt.type === 'project.updated') {
       refresh()
     }
+    if ((evt.type === 'task.updated' || evt.type === 'task.created') && evt.resourceId) {
+      flash(evt.resourceId)
+    }
   })
 
-  async function handleCreateTask(e: React.FormEvent) {
-    e.preventDefault()
-    if (!title.trim()) return
-    await api.createTask(projectId, { title, configuration: { priority, tags: [] } })
-    setTitle('')
-    refresh()
+  function flash(taskId: string) {
+    setHighlighted((prev) => new Set(prev).add(taskId))
+    setTimeout(() => {
+      setHighlighted((prev) => {
+        const next = new Set(prev)
+        next.delete(taskId)
+        return next
+      })
+    }, FLASH_DURATION_MS)
   }
 
-  async function handleStatusChange(taskId: string, status: TaskStatus) {
-    await api.updateTask(taskId, { status })
-    refresh()
+  async function handleMoveTask(taskId: string, status: TaskStatus) {
+    const prevTasks = tasks
+    setTasks((ts) => ts.map((t) => (t.id === taskId ? { ...t, status } : t)))
+    try {
+      await api.updateTask(taskId, { status })
+    } catch (err) {
+      setTasks(prevTasks)
+      setBanner(err instanceof ApiError ? err.message : 'Failed to move task')
+      setTimeout(() => setBanner(null), 4000)
+    }
   }
 
-  async function handleDeleteTask(taskId: string, e: React.MouseEvent) {
-    e.stopPropagation()
-    await api.deleteTask(taskId)
-    refresh()
-  }
+  const blockedCount = useMemo(() => countBlocked(tasks), [tasks])
+  const visibleTasks = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return tasks
+    return tasks.filter((t) => t.title.toLowerCase().includes(q))
+  }, [tasks, search])
+  const viewers = othersViewing(presence)
 
   if (!project) return <p>Loading…</p>
 
   return (
     <div>
-      <button onClick={onBack}>&larr; Projects</button>
-      <h1>{project.name}</h1>
-      <p>{project.description}</p>
-      <PresenceRoster entries={presence} />
+      <div className="board-header">
+        <div className="board-header-left">
+          <button className="breadcrumb-link" onClick={onBack}>
+            ← Projects
+          </button>
+          <div className="tabs-row">
+            <span className="tab tab-active">Board</span>
+            <span className="tab tab-disabled" title="Not implemented yet">
+              Gantt
+            </span>
+            <span className="tab tab-disabled" title="Not implemented yet">
+              List
+            </span>
+          </div>
+        </div>
+        <div className="board-header-right">
+          <span className={connected ? 'live-pill' : 'reconnecting-pill'}>
+            <span className="live-dot" />
+            {connected ? 'Live' : 'Reconnecting…'}
+          </span>
+          {viewers.length > 0 && (
+            <div className="avatar-stack">
+              {viewers.map((v) => (
+                <Avatar key={v.clientId} name={v.name} />
+              ))}
+            </div>
+          )}
+          <ThemeToggle />
+          <IdentityBadge />
+        </div>
+      </div>
 
-      <form onSubmit={handleCreateTask} className="row">
-        <input placeholder="Task title" value={title} onChange={(e) => setTitle(e.target.value)} />
-        <select value={priority} onChange={(e) => setPriority(e.target.value)}>
-          <option value="low">low</option>
-          <option value="medium">medium</option>
-          <option value="high">high</option>
-        </select>
-        <button type="submit">Add task</button>
-      </form>
+      <div className="board-title-row">
+        <div>
+          <h1>{project.name}</h1>
+          <p className="board-meta">
+            {project.description} · {tasks.length} tasks
+            {blockedCount > 0 && ` · ${blockedCount} blocked`}
+          </p>
+        </div>
+        <div className="spacer" />
+        <button className="btn-primary" onClick={() => setShowNewTask(true)}>
+          + New task
+        </button>
+      </div>
 
-      <ul className="list">
-        {tasks.map((t) => {
-          const viewers = viewersOfTask(presence, t.id)
-          return (
-            <li key={t.id} className="card" onClick={() => onOpenTask(t.id)}>
-              <div>
-                <strong>{t.title}</strong>
-                <p>priority: {t.configuration?.priority || 'n/a'}</p>
-              </div>
-              <div className="task-controls" onClick={(e) => e.stopPropagation()}>
-                {viewers.length > 0 && (
-                  <span className="viewer-dots" title={viewers.map((v) => v.name).join(', ')}>
-                    {viewers.map((v) => (
-                      <span key={v.clientId} className="dot" style={{ background: colorForClientId(v.clientId) }} />
-                    ))}
-                  </span>
-                )}
-                <select value={t.status} onChange={(e) => handleStatusChange(t.id, e.target.value as TaskStatus)}>
-                  {STATUSES.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-                <button onClick={(e) => handleDeleteTask(t.id, e)}>Delete</button>
-              </div>
-            </li>
-          )
-        })}
-        {tasks.length === 0 && <p>No tasks yet — add one above.</p>}
-      </ul>
+      <div className="board-toolbar">
+        <input
+          className="search-input"
+          placeholder="Search tasks…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      </div>
+
+      {banner && <p className="error-banner">{banner}</p>}
+
+      <KanbanBoard
+        tasks={visibleTasks}
+        presence={presence}
+        highlighted={highlighted}
+        onMoveTask={handleMoveTask}
+        onOpenTask={setSelectedTaskId}
+      />
+
+      {showNewTask && (
+        <NewTaskForm projectId={projectId} tasks={tasks} onClose={() => setShowNewTask(false)} onCreated={refresh} />
+      )}
+
+      {selectedTaskId && (
+        <TaskPanel
+          taskId={selectedTaskId}
+          tasks={tasks}
+          presence={presence}
+          onClose={() => setSelectedTaskId(null)}
+        />
+      )}
     </div>
   )
 }
