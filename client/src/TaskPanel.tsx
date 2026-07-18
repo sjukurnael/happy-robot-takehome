@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from './api'
-import type { Comment, PresenceEntry, Task, TaskStatus } from './types'
+import type { Comment, CommentAddedPayload, CommentDeletedPayload, PresenceEntry, Task, TaskStatus } from './types'
 import { useWsEvents } from './useWsEvents'
 import { viewersOfTask } from './Presence'
 import { Avatar } from './Avatar'
@@ -60,8 +60,13 @@ export function TaskPanel({
   }, [taskId])
 
   useWsEvents((evt) => {
-    if (evt.type === 'comment.created' && task && evt.projectId === task.projectId) {
-      refreshComments()
+    if (evt.type !== 'event') return
+    if (evt.eventType === 'comment.added') {
+      const { comment } = evt.payload as CommentAddedPayload
+      if (comment.taskId === taskId) refreshComments()
+    } else if (evt.eventType === 'comment.deleted') {
+      const { taskId: eventTaskId } = evt.payload as CommentDeletedPayload
+      if (eventTaskId === taskId) refreshComments()
     }
   })
 

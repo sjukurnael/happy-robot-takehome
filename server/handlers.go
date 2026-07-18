@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -42,10 +43,35 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	}
 }
 
+// actorFrom identifies who's making a mutating request, for the events
+// table's actor column. The frontend sends the user's display name (see
+// identity.ts) on every mutating call; anything else (curl, a missing
+// header) just gets attributed to "unknown" rather than rejected.
+func actorFrom(r *http.Request) string {
+	if a := r.Header.Get("X-Actor"); a != "" {
+		return a
+	}
+	return "unknown"
+}
+
+// broadcastEvents publishes durable events over the hub after their
+// transaction has already committed — store methods return events only
+// once the mutation that produced them is safely persisted.
+func (a *API) broadcastEvents(events []StoredEvent) {
+	for _, ev := range events {
+		a.hub.BroadcastEvent(ev)
+	}
+}
+
 // --- Projects ---
 
 func (a *API) listProjects(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, a.store.ListProjects())
+	projects, err := a.store.ListProjects(r.Context())
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, projects)
 }
 
 func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
@@ -54,15 +80,19 @@ func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	created := a.store.CreateProject(&p)
+	created, err := a.store.CreateProject(r.Context(), &p)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusCreated, created)
 }
 
 func (a *API) getProject(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "projectID")
-	p, ok := a.store.GetProject(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "project not found")
+	p, err := a.store.GetProject(r.Context(), id)
+	if err != nil {
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
@@ -70,40 +100,30 @@ func (a *API) getProject(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) updateProject(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "projectID")
-	var patch struct {
-		Name        *string        `json:"name"`
-		Description *string        `json:"description"`
-		Metadata    map[string]any `json:"metadata"`
-	}
+	var patch ProjectPatch
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	p, ok := a.store.UpdateProject(id, func(p *Project) {
-		if patch.Name != nil {
-			p.Name = *patch.Name
-		}
-		if patch.Description != nil {
-			p.Description = *patch.Description
-		}
-		if patch.Metadata != nil {
-			p.Metadata = patch.Metadata
-		}
-	})
-	if !ok {
-		writeError(w, http.StatusNotFound, "project not found")
+	p, events, err := a.store.UpdateProject(r.Context(), id, patch, actorFrom(r))
+	if err != nil {
+		writeStoreError(w, err)
 		return
 	}
-	a.hub.Broadcast(Event{Type: "project.updated", ProjectID: id, ResourceID: id})
+	a.broadcastEvents(events)
 	writeJSON(w, http.StatusOK, p)
 }
 
 func (a *API) deleteProject(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "projectID")
-	if !a.store.DeleteProject(id) {
-		writeError(w, http.StatusNotFound, "project not found")
+	if err := a.store.DeleteProject(r.Context(), id); err != nil {
+		writeStoreError(w, err)
 		return
 	}
+	// project.deleted is intentionally not part of the per-project event
+	// log (see events.go) — a project deleting itself would cascade-erase
+	// its own event history, including this notification, before any
+	// client could replay it. Kept as the old thin broadcast instead.
 	a.hub.Broadcast(Event{Type: "project.deleted", ProjectID: id, ResourceID: id})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -112,13 +132,18 @@ func (a *API) deleteProject(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) listTasks(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectID")
-	writeJSON(w, http.StatusOK, a.store.ListTasksByProject(projectID))
+	tasks, err := a.store.ListTasksByProject(r.Context(), projectID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tasks)
 }
 
 func (a *API) createTask(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectID")
-	if _, ok := a.store.GetProject(projectID); !ok {
-		writeError(w, http.StatusNotFound, "project not found")
+	if _, err := a.store.GetProject(r.Context(), projectID); err != nil {
+		writeStoreError(w, err)
 		return
 	}
 	var t Task
@@ -127,20 +152,20 @@ func (a *API) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t.ProjectID = projectID
-	created, err := a.store.CreateTask(&t)
+	created, events, err := a.store.CreateTask(r.Context(), &t, actorFrom(r))
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	a.hub.Broadcast(Event{Type: "task.created", ProjectID: projectID, ResourceID: created.ID})
+	a.broadcastEvents(events)
 	writeJSON(w, http.StatusCreated, created)
 }
 
 func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "taskID")
-	t, ok := a.store.GetTask(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "task not found")
+	t, err := a.store.GetTask(r.Context(), id)
+	if err != nil {
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, t)
@@ -148,67 +173,28 @@ func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) updateTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "taskID")
-	var patch struct {
-		Title         *string            `json:"title"`
-		Status        *TaskStatus        `json:"status"`
-		AssignedTo    []string           `json:"assignedTo"`
-		Configuration *TaskConfiguration `json:"configuration"`
-		Dependencies  []string           `json:"dependencies"`
-	}
+	var patch TaskPatch
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	t, err := a.store.UpdateTask(id, func(t *Task, tasks map[string]*Task) error {
-		deps := t.Dependencies
-		if patch.Dependencies != nil {
-			if err := validateDependencies(t.ID, t.ProjectID, patch.Dependencies, tasks); err != nil {
-				return err
-			}
-			deps = patch.Dependencies
-		}
-		if patch.Status != nil && *patch.Status == StatusDone {
-			if err := validateCanComplete(deps, tasks); err != nil {
-				return err
-			}
-		}
-
-		if patch.Title != nil {
-			t.Title = *patch.Title
-		}
-		if patch.Status != nil {
-			t.Status = *patch.Status
-		}
-		if patch.AssignedTo != nil {
-			t.AssignedTo = patch.AssignedTo
-		}
-		if patch.Configuration != nil {
-			t.Configuration = *patch.Configuration
-		}
-		if patch.Dependencies != nil {
-			t.Dependencies = patch.Dependencies
-		}
-		return nil
-	})
+	t, events, err := a.store.UpdateTask(r.Context(), id, patch, actorFrom(r))
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	a.hub.Broadcast(Event{Type: "task.updated", ProjectID: t.ProjectID, ResourceID: t.ID})
+	a.broadcastEvents(events)
 	writeJSON(w, http.StatusOK, t)
 }
 
 func (a *API) deleteTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "taskID")
-	t, affected, ok := a.store.DeleteTask(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "task not found")
+	_, events, err := a.store.DeleteTask(r.Context(), id, actorFrom(r))
+	if err != nil {
+		writeStoreError(w, err)
 		return
 	}
-	for _, affectedID := range affected {
-		a.hub.Broadcast(Event{Type: "task.updated", ProjectID: t.ProjectID, ResourceID: affectedID})
-	}
-	a.hub.Broadcast(Event{Type: "task.deleted", ProjectID: t.ProjectID, ResourceID: id})
+	a.broadcastEvents(events)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -216,32 +202,58 @@ func (a *API) deleteTask(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) listComments(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskID")
-	writeJSON(w, http.StatusOK, a.store.ListCommentsByTask(taskID))
+	comments, err := a.store.ListCommentsByTask(r.Context(), taskID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, comments)
 }
 
 func (a *API) createComment(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskID")
-	task, ok := a.store.GetTask(taskID)
-	if !ok {
-		writeError(w, http.StatusNotFound, "task not found")
-		return
-	}
 	var c Comment
 	if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
 	c.TaskID = taskID
-	created := a.store.CreateComment(&c)
-	a.hub.Broadcast(Event{Type: "comment.created", ProjectID: task.ProjectID, ResourceID: created.ID})
+	created, events, err := a.store.CreateComment(r.Context(), &c, actorFrom(r))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	a.broadcastEvents(events)
 	writeJSON(w, http.StatusCreated, created)
 }
 
 func (a *API) deleteComment(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "commentID")
-	if !a.store.DeleteComment(id) {
-		writeError(w, http.StatusNotFound, "comment not found")
+	_, _, events, err := a.store.DeleteComment(r.Context(), id, actorFrom(r))
+	if err != nil {
+		writeStoreError(w, err)
 		return
 	}
+	a.broadcastEvents(events)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Events (catch-up) ---
+
+// listEvents serves GET /api/projects/{projectID}/events?after=<seq>&limit=<n>
+// — events with seq > after, ordered ascending, capped at 500. Passing
+// after=0 (or omitting it) returns the project's entire history rather
+// than nothing; that's technically valid but not the intended use — a
+// fresh client should seed lastSeq from the project snapshot's lastSeq
+// field instead of walking the whole log from zero.
+func (a *API) listEvents(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectID")
+	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	events, err := a.store.ListEventsSince(r.Context(), projectID, after, limit)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
 }

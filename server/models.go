@@ -7,8 +7,13 @@ type Project struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	Metadata    map[string]any `json:"metadata"`
-	CreatedAt   time.Time      `json:"createdAt"`
-	UpdatedAt   time.Time      `json:"updatedAt"`
+	// LastSeq is the project's current event sequence number — a fresh
+	// client seeds its lastSeq from this when it first loads the project,
+	// then subscribes over WS with it so the server replays only what's
+	// missing.
+	LastSeq   int64     `json:"lastSeq"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 type TaskStatus string

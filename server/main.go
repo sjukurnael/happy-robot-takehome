@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -10,8 +11,20 @@ import (
 )
 
 func main() {
-	store := NewStore()
-	hub := NewHub()
+	ctx := context.Background()
+
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = "postgres://app:app@localhost:5432/taskman?sslmode=disable"
+	}
+	pool, err := connectDB(ctx, databaseURL)
+	if err != nil {
+		log.Fatal("failed to connect to database: ", err)
+	}
+	defer pool.Close()
+
+	store := NewStore(pool)
+	hub := NewHub(store)
 	api := &API{store: store, hub: hub}
 
 	r := chi.NewRouter()
@@ -34,6 +47,7 @@ func main() {
 			r.Delete("/", api.deleteProject)
 			r.Get("/tasks", api.listTasks)
 			r.Post("/tasks", api.createTask)
+			r.Get("/events", api.listEvents)
 		})
 	})
 
@@ -61,7 +75,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Actor")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return

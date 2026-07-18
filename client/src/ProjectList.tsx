@@ -44,7 +44,14 @@ export function ProjectList({ onOpen }: { onOpen: (id: string) => void }) {
   }, [])
 
   useWsEvents((evt) => {
-    if (evt.type.startsWith('project.') || evt.type.startsWith('task.')) {
+    // project.deleted is the legacy thin notification (outside the
+    // per-project event log — see server/events.go); everything else
+    // relevant here arrives wrapped as type "event".
+    if (evt.type === 'project.deleted') {
+      refresh()
+      return
+    }
+    if (evt.type === 'event' && (evt.eventType === 'project.updated' || evt.eventType?.startsWith('task.'))) {
       refresh()
     }
   })

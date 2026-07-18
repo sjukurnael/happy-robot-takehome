@@ -65,8 +65,12 @@ class LiveConnection {
     return () => this.connectionListeners.delete(listener)
   }
 
-  setViewing(projectId: string, taskId?: string) {
-    this.send({ type: 'viewing', projectId, taskId: taskId ?? '' })
+  // lastSeq tells the server what this client already has for projectId;
+  // on an actual project switch (not just moving between tasks within the
+  // same project) the server replays everything since lastSeq before this
+  // connection is otherwise eligible for live broadcasts on that project.
+  setViewing(projectId: string, taskId?: string, lastSeq = 0) {
+    this.send({ type: 'viewing', projectId, taskId: taskId ?? '', lastSeq })
   }
 
   rename(name: string) {

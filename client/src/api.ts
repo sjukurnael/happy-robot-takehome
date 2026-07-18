@@ -1,4 +1,5 @@
-import type { Comment, Project, Task, TaskStatus } from './types'
+import type { Comment, Project, StoredEvent, Task, TaskStatus } from './types'
+import { getIdentity } from './identity'
 
 // Carries the HTTP status alongside the server's error message so callers
 // can distinguish e.g. a 409 (blocked by dependency) from a 400 (malformed
@@ -14,7 +15,15 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      // Attributes mutations to a display name for the events table's
+      // actor column — getIdentity() reads the same sessionStorage-backed
+      // identity the WS connection uses (live.ts), so this doesn't prompt
+      // again or diverge from it.
+      'X-Actor': getIdentity().name,
+      ...(init?.headers ?? {}),
+    },
   })
   if (!res.ok) {
     const body = await res.text()
@@ -41,6 +50,12 @@ export const api = {
   deleteProject: (id: string) => request<void>(`/api/projects/${id}/`, { method: 'DELETE' }),
 
   listTasks: (projectId: string) => request<Task[]>(`/api/projects/${projectId}/tasks`),
+  // Catch-up: events for projectId with seq > after, ascending, capped at
+  // limit server-side. after=0 returns the whole history — only meant for
+  // filling a specific gap, not initial sync (seed lastSeq from the
+  // project snapshot's lastSeq instead).
+  listEvents: (projectId: string, after: number, limit = 500) =>
+    request<StoredEvent[]>(`/api/projects/${projectId}/events?after=${after}&limit=${limit}`),
   createTask: (
     projectId: string,
     data: { title: string; configuration?: Partial<Task['configuration']>; assignedTo?: string[]; dependencies?: string[] },
