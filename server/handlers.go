@@ -85,6 +85,11 @@ func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	// project.created, like project.deleted, lives outside the per-project
+	// event log (see events.go) — a project that doesn't exist yet has no
+	// log to append to, and clients watching the dashboard only need a
+	// "refetch the list" nudge, not a replayable event.
+	a.hub.Broadcast(Event{Type: "project.created", ProjectID: created.ID, ResourceID: created.ID})
 	writeJSON(w, http.StatusCreated, created)
 }
 

@@ -44,10 +44,10 @@ export function ProjectList({ onOpen }: { onOpen: (id: string) => void }) {
   }, [])
 
   useWsEvents((evt) => {
-    // project.deleted is the legacy thin notification (outside the
-    // per-project event log — see server/events.go); everything else
+    // project.created / project.deleted are thin notifications outside the
+    // per-project event log (see server/events.go); everything else
     // relevant here arrives wrapped as type "event".
-    if (evt.type === 'project.deleted') {
+    if (evt.type === 'project.created' || evt.type === 'project.deleted') {
       refresh()
       return
     }

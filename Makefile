@@ -4,7 +4,15 @@ DB_URL = postgres://app:app@localhost:5432/taskman?sslmode=disable
 MIGRATE_IMG = migrate/migrate:v4.17.1
 MIGRATIONS_DIR = $(CURDIR)/server/migrations
 
-.PHONY: db-up db-migrate db-seed db-reset db-psql
+.PHONY: up down db-up db-migrate db-seed db-reset db-psql
+
+# Full stack in Docker: Postgres + migrations + Go server + built frontend.
+up:
+	$(COMPOSE) --profile app up -d --build --wait
+	@echo "App running at http://localhost:3000 (API on :8080). Load demo data with: make db-seed"
+
+down:
+	$(COMPOSE) --profile app down
 
 db-up:
 	$(COMPOSE) up -d --wait db
@@ -19,7 +27,7 @@ db-seed:
 	$(COMPOSE) exec -T db psql -U app -d taskman -v ON_ERROR_STOP=1 < server/seed/seed.sql
 
 db-reset:
-	$(COMPOSE) down -v
+	$(COMPOSE) --profile app down -v
 	$(MAKE) db-up
 	$(MAKE) db-migrate
 	$(MAKE) db-seed

@@ -42,32 +42,68 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const subscribedProjectRef = useRef<string | null>(null)
   const pendingRef = useRef<WsEvent[]>([])
   const fillingGapRef = useRef(false)
+  const snapshotLoadingRef = useRef(false)
   const selectedTaskIdRef = useRef<string | null>(null)
   selectedTaskIdRef.current = selectedTaskId
 
-  const refresh = () => {
-    api.getProject(projectId).then((p) => {
+  const refresh = async () => {
+    // While the snapshot is loading, incoming events are buffered (see the
+    // useWsEvents handler below) instead of applied — applying against
+    // about-to-be-replaced state would let the setTasks below clobber them.
+    snapshotLoadingRef.current = true
+    try {
+      // Order matters: the project (and its lastSeq) is read first, tasks
+      // second. The tasks snapshot is therefore generated at-or-after the
+      // lastSeq read, so it reflects every mutation up to that seq —
+      // anything newer arrives as an event with seq > lastSeq and applies
+      // idempotently on top. (Fetching the two in parallel had a race: a
+      // task created between the reads could be missing from the tasks
+      // response while already covered by lastSeq, so its event would
+      // never be replayed and the task stayed invisible.)
+      const p = await api.getProject(projectId)
       setProject(p)
+      const ts = await api.listTasks(projectId)
+      setTasks(ts)
       lastSeqRef.current = p.lastSeq
       // Only the very first "viewing" message for a given project carries
       // the subscribe semantics that trigger server-side replay — send it
-      // here, once we actually know the project's current lastSeq, rather
-      // than from the taskId-focus effect below (which fires synchronously
-      // on every projectId change, before this fetch could possibly have
+      // here, once the snapshot is actually in local state, rather than
+      // from the taskId-focus effect below (which fires synchronously on
+      // every projectId change, before this fetch could possibly have
       // resolved, and would otherwise subscribe with a stale/zero lastSeq
       // and force a full-history replay instead of a precise gap-fill).
       if (subscribedProjectRef.current !== projectId) {
         subscribedProjectRef.current = projectId
         live.setViewing(projectId, selectedTaskIdRef.current ?? undefined, p.lastSeq)
       }
-    })
-    api.listTasks(projectId).then(setTasks)
+    } finally {
+      snapshotLoadingRef.current = false
+      // Drain whatever arrived while the snapshot was loading — entries
+      // already covered by lastSeq are dropped, newer ones apply now.
+      processBuffer()
+    }
   }
 
   useEffect(() => {
+    lastSeqRef.current = 0
+    pendingRef.current = []
     refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId])
+
+  // A reconnected socket is a brand-new server-side connection with no
+  // viewing state: without this, the client would silently drop out of the
+  // presence roster and never get the offline gap replayed (until some
+  // future live event happened to expose it via gap detection). Re-sending
+  // "viewing" with the current lastSeq makes the server replay exactly
+  // what was missed. Skipped until refresh() has done the initial
+  // subscribe, so we never subscribe with lastSeq 0 and trigger a
+  // full-history replay.
+  useEffect(() => {
+    if (!connected || subscribedProjectRef.current !== projectId) return
+    live.setViewing(projectId, selectedTaskIdRef.current ?? undefined, lastSeqRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, projectId])
 
   // Task-focus changes within the same project: presence only. Skipped
   // until refresh() above has completed its initial subscribe for this
@@ -147,6 +183,12 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     let progressed = true
     while (progressed) {
       progressed = false
+      // Drop entries already covered by lastSeq — e.g. events that were
+      // buffered while a fillGap fetch (whose response includes them too)
+      // was in flight. Without this, a stale entry wedges the head of the
+      // buffer forever: never equal to lastSeq+1, so treated as a "gap"
+      // that every fillGap round trip fails to clear.
+      pendingRef.current = pendingRef.current.filter((e) => (e.seq ?? 0) > lastSeqRef.current)
       pendingRef.current.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
       const next = pendingRef.current[0]
       if (next && next.seq === lastSeqRef.current + 1) {
@@ -203,7 +245,9 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     const seq = evt.seq
     if (seq <= lastSeqRef.current) return // duplicate/old — ignore
     pendingRef.current.push(evt)
-    processBuffer()
+    // While refresh() is mid-snapshot, just buffer — it drains the buffer
+    // itself once the fresh state is in place.
+    if (!snapshotLoadingRef.current) processBuffer()
   })
 
   async function handleMoveTask(taskId: string, status: TaskStatus) {

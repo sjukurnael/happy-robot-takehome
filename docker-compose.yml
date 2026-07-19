@@ -1,3 +1,11 @@
+# Two ways to use this file:
+#
+#   make db-up   — starts only Postgres (the default profile), for local dev
+#                  where the Go server and Vite run natively on the host.
+#   make up      — starts the whole stack (profile "app"): Postgres,
+#                  migrations, the Go server, and the built frontend behind
+#                  nginx at http://localhost:3000. One command, no local
+#                  Go/Node needed.
 services:
   db:
     image: postgres:16-alpine
@@ -15,6 +23,46 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+
+  # Runs migrations once and exits; server waits for it to complete. Uses
+  # the same image/flags as the `make db-migrate` target so both paths
+  # share one migrations table.
+  migrate:
+    image: migrate/migrate:v4.17.1
+    profiles: [app]
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./server/migrations:/migrations:ro
+    command:
+      [
+        "-path=/migrations",
+        "-database",
+        "postgres://app:app@db:5432/taskman?sslmode=disable&x-migrations-table=ev_migrations",
+        "up",
+      ]
+
+  server:
+    build: ./server
+    profiles: [app]
+    environment:
+      DATABASE_URL: postgres://app:app@db:5432/taskman?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+
+  client:
+    build: ./client
+    profiles: [app]
+    depends_on:
+      - server
+    ports:
+      - "3000:80"
 
 volumes:
   taskman_pgdata:
