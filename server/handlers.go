@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -39,7 +41,10 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		errors.Is(err, ErrCrossProjectDependency):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		// Unexpected errors are logged server-side but never echoed to the
+		// client — raw driver/SQL error strings are an internals leak.
+		log.Printf("internal error: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
 }
 
@@ -72,6 +77,19 @@ func (a *API) listProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, projects)
+}
+
+// listProjectStats serves the dashboard's per-project aggregates (task
+// counts, blocked counts, assignees, last-edited) in one response, so the
+// project list never has to download every task of every project just to
+// render stat cards.
+func (a *API) listProjectStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := a.store.ListProjectStats(r.Context())
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
@@ -135,8 +153,34 @@ func (a *API) deleteProject(w http.ResponseWriter, r *http.Request) {
 
 // --- Tasks ---
 
+// listTasks returns a project's tasks, with the project's lastSeq as the
+// response ETag. lastSeq is bumped by every mutation in the project, so it
+// doubles as a version stamp for this snapshot: Cache-Control: no-cache
+// makes the browser revalidate with If-None-Match on each request, and an
+// unchanged project answers 304 with no body — the client transparently
+// reuses its cached copy (no api.ts changes needed), so a large task list
+// only crosses the wire when something actually changed.
+//
+// The read order matters and mirrors the client's refresh(): lastSeq is
+// read before the tasks, so the task snapshot is at-or-newer than the
+// ETag. The ETag can understate what the body contains, which only causes
+// one redundant refetch later — never a stale cache hit, because any
+// mutation that slipped between the two reads has already bumped lastSeq
+// past the ETag being returned.
 func (a *API) listTasks(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectID")
+	p, err := a.store.GetProject(r.Context(), projectID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	etag := fmt.Sprintf(`"%d"`, p.LastSeq)
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	tasks, err := a.store.ListTasksByProject(r.Context(), projectID)
 	if err != nil {
 		writeStoreError(w, err)

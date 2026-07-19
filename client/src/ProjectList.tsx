@@ -1,26 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from './api'
-import type { Project, Task } from './types'
+import type { Project, ProjectStats } from './types'
 import { useWsEvents, useAllProjectsPresence } from './useWsEvents'
 import { Avatar } from './Avatar'
-import { countBlocked } from './taskUtils'
 import { formatRelativeTime } from './format'
-
-interface ProjectStats {
-  total: number
-  done: number
-  blocked: number
-  assignees: string[]
-  lastEdited: string
-}
-
-function computeStats(project: Project, tasks: Task[]): ProjectStats {
-  const done = tasks.filter((t) => t.status === 'done').length
-  const blocked = countBlocked(tasks)
-  const assignees = Array.from(new Set(tasks.flatMap((t) => t.assignedTo)))
-  const lastEdited = tasks.reduce((max, t) => (t.updatedAt > max ? t.updatedAt : max), project.updatedAt)
-  return { total: tasks.length, done, blocked, assignees, lastEdited }
-}
 
 export function ProjectList({ onOpen }: { onOpen: (id: string) => void }) {
   const [projects, setProjects] = useState<Project[]>([])
@@ -30,13 +13,13 @@ export function ProjectList({ onOpen }: { onOpen: (id: string) => void }) {
   const [description, setDescription] = useState('')
   const presenceByProject = useAllProjectsPresence()
 
+  // Two small requests, regardless of how many projects/tasks exist — the
+  // stat cards used to be computed client-side by downloading every task
+  // of every project, which re-shipped entire projects on each refresh.
   const refresh = async () => {
-    const projs = await api.listProjects()
+    const [projs, statList] = await Promise.all([api.listProjects(), api.listProjectStats()])
     setProjects(projs)
-    const entries = await Promise.all(
-      projs.map(async (p) => [p.id, computeStats(p, await api.listTasks(p.id))] as const),
-    )
-    setStats(Object.fromEntries(entries))
+    setStats(Object.fromEntries(statList.map((s) => [s.projectId, s])))
   }
 
   useEffect(() => {

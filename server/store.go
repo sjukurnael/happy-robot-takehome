@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -155,6 +156,51 @@ func (s *Store) UpdateProject(ctx context.Context, id string, patch ProjectPatch
 		return nil, nil, err
 	}
 	return updated, events, nil
+}
+
+// ProjectStats is the dashboard's per-project aggregate — computed in one
+// SQL pass instead of shipping every task of every project to the client.
+// "Blocked" mirrors client/src/taskUtils.ts exactly: a task counts as
+// blocked when any of its dependencies is not done.
+type ProjectStats struct {
+	ProjectID  string    `json:"projectId"`
+	Total      int       `json:"total"`
+	Done       int       `json:"done"`
+	Blocked    int       `json:"blocked"`
+	Assignees  []string  `json:"assignees"`
+	LastEdited time.Time `json:"lastEdited"`
+}
+
+func (s *Store) ListProjectStats(ctx context.Context) ([]*ProjectStats, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT p.id::text,
+		       COUNT(DISTINCT t.id),
+		       COUNT(DISTINCT t.id) FILTER (WHERE t.status = 'done'),
+		       COUNT(DISTINCT t.id) FILTER (WHERE EXISTS (
+		           SELECT 1 FROM task_dependencies td
+		           JOIN tasks d ON d.id = td.depends_on_task_id
+		           WHERE td.task_id = t.id AND d.status <> 'done')),
+		       COALESCE(array_agg(DISTINCT a.assignee) FILTER (WHERE a.assignee IS NOT NULL), '{}'),
+		       GREATEST(p.updated_at, COALESCE(MAX(t.updated_at), p.updated_at))
+		FROM projects p
+		LEFT JOIN tasks t ON t.project_id = p.id
+		LEFT JOIN LATERAL unnest(t.assigned_to) AS a(assignee) ON true
+		GROUP BY p.id
+		ORDER BY p.created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []*ProjectStats{}
+	for rows.Next() {
+		st := &ProjectStats{}
+		if err := rows.Scan(&st.ProjectID, &st.Total, &st.Done, &st.Blocked, &st.Assignees, &st.LastEdited); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) DeleteProject(ctx context.Context, id string) error {

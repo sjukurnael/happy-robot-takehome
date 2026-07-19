@@ -1,4 +1,4 @@
-import type { Comment, Project, StoredEvent, Task, TaskStatus } from './types'
+import type { Comment, Project, ProjectStats, StoredEvent, Task, TaskStatus } from './types'
 import { getIdentity } from './identity'
 
 // Carries the HTTP status alongside the server's error message so callers
@@ -42,6 +42,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   listProjects: () => request<Project[]>('/api/projects/'),
+  listProjectStats: () => request<ProjectStats[]>('/api/projects/stats'),
   createProject: (data: { name: string; description: string; metadata?: Record<string, unknown> }) =>
     request<Project>('/api/projects/', { method: 'POST', body: JSON.stringify(data) }),
   getProject: (id: string) => request<Project>(`/api/projects/${id}/`),

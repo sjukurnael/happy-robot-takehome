@@ -31,6 +31,7 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
+	r.Use(newRateLimiter().middleware)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -41,6 +42,7 @@ func main() {
 	r.Route("/api/projects", func(r chi.Router) {
 		r.Get("/", api.listProjects)
 		r.Post("/", api.createProject)
+		r.Get("/stats", api.listProjectStats)
 		r.Route("/{projectID}", func(r chi.Router) {
 			r.Get("/", api.getProject)
 			r.Patch("/", api.updateProject)

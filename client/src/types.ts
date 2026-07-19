@@ -37,6 +37,19 @@ export interface Comment {
   timestamp: string
 }
 
+// Per-project dashboard aggregates, computed server-side in one SQL pass
+// (GET /api/projects/stats) so the project list never downloads full task
+// lists just to render stat cards. "blocked" mirrors taskUtils.ts: a task
+// with any not-done dependency.
+export interface ProjectStats {
+  projectId: string
+  total: number
+  done: number
+  blocked: number
+  assignees: string[]
+  lastEdited: string
+}
+
 export interface PresenceEntry {
   clientId: string
   name: string
