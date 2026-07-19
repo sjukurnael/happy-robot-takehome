@@ -7,9 +7,28 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+)
+
+const (
+	// writeTimeout bounds any single write to a connection — a peer that
+	// stops reading can't wedge the writer goroutine indefinitely.
+	writeTimeout = 10 * time.Second
+	// pongWait is how long a connection may go silent before the read loop
+	// gives up on it; pingInterval must be comfortably shorter so a healthy
+	// client always gets a ping (and answers with a pong, resetting the
+	// deadline) in time. Browsers answer pings automatically.
+	pongWait     = 60 * time.Second
+	pingInterval = 30 * time.Second
+	// sendQueueSize is the per-connection buffered send queue. A client
+	// that falls this many messages behind is disconnected (backpressure)
+	// rather than allowed to slow everyone else's broadcast; it resyncs
+	// through the normal reconnect path — re-sending "viewing" with its
+	// lastSeq — so nothing is lost by dropping it.
+	sendQueueSize = 256
 )
 
 // newID generates an ephemeral, prefixed ID for things that don't live in
@@ -51,12 +70,60 @@ type wsClient struct {
 	name      string
 	projectID string
 	taskID    string
-	// writeMu serializes writes to conn: gorilla/websocket forbids
-	// concurrent writers on one connection, and this connection can now be
-	// written to from two different goroutines — its own read-loop
-	// (subscribe-time replay) and whichever HTTP handler goroutine is
-	// broadcasting a live event.
-	writeMu sync.Mutex
+	// send is drained by the client's writer goroutine — the sole writer
+	// to conn, which is what satisfies gorilla/websocket's one-writer rule
+	// (pings included, since the writer goroutine sends those too).
+	send      chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// close is safe to call from any goroutine, any number of times.
+func (c *wsClient) close() {
+	c.closeOnce.Do(func() {
+		close(c.done)
+		c.conn.Close()
+	})
+}
+
+// enqueue hands data to the writer goroutine without ever blocking the
+// caller (broadcasts run on HTTP handler goroutines). A full queue means
+// the client can't keep up — disconnect it instead of letting it apply
+// backpressure to everyone else; it will reconnect and catch up via the
+// event log.
+func (c *wsClient) enqueue(data []byte) {
+	select {
+	case c.send <- data:
+	case <-c.done:
+	default:
+		log.Printf("ws: disconnecting slow client %s (send queue full)", c.clientID)
+		c.close()
+	}
+}
+
+// writeLoop is the only goroutine that writes to conn. It drains the send
+// queue and keeps the connection alive with periodic pings.
+func (c *wsClient) writeLoop() {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case data := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				c.close()
+				return
+			}
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				c.close()
+				return
+			}
+		case <-c.done:
+			return
+		}
+	}
 }
 
 type Hub struct {
@@ -89,10 +156,26 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		name = "Guest"
 	}
 
-	client := &wsClient{conn: conn, clientID: clientID, name: name}
+	client := &wsClient{
+		conn:     conn,
+		clientID: clientID,
+		name:     name,
+		send:     make(chan []byte, sendQueueSize),
+		done:     make(chan struct{}),
+	}
 	h.mu.Lock()
 	h.clients[conn] = client
 	h.mu.Unlock()
+
+	go client.writeLoop()
+
+	// Dead-connection detection: the read loop bails if the peer goes
+	// silent past pongWait; the writer's pings keep a healthy peer's pongs
+	// (sent automatically by browsers) flowing to reset the deadline.
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
 
 	go func() {
 		defer func() {
@@ -100,7 +183,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			c := h.clients[conn]
 			delete(h.clients, conn)
 			h.mu.Unlock()
-			conn.Close()
+			client.close()
 			if c != nil && c.projectID != "" {
 				h.broadcastPresence(c.projectID)
 			}
@@ -151,7 +234,7 @@ func (h *Hub) setViewing(conn *websocket.Conn, projectID, taskID string, lastSeq
 	// actual project switch/initial subscribe, not on every task-focus
 	// change within the same project.
 	if projectID != "" && projectID != oldProjectID {
-		h.replayTo(conn, client, projectID, lastSeq)
+		h.replayTo(client, projectID, lastSeq)
 	}
 
 	if oldProjectID != "" && oldProjectID != projectID {
@@ -171,14 +254,19 @@ func (h *Hub) setViewing(conn *websocket.Conn, projectID, taskID string, lastSeq
 // client to refetch a fresh snapshot instead" fallback would be the fix;
 // not implemented in this phase since ordinary reconnect gaps are small,
 // and ListEventsSince already caps a single query at 500 rows.
-func (h *Hub) replayTo(conn *websocket.Conn, client *wsClient, projectID string, after int64) {
+func (h *Hub) replayTo(client *wsClient, projectID string, after int64) {
 	events, err := h.store.ListEventsSince(context.Background(), projectID, after, 500)
 	if err != nil {
 		log.Println("replay query error:", err)
 		return
 	}
 	for _, ev := range events {
-		h.writeEvent(conn, client, ev)
+		data, err := marshalStoredEvent(ev)
+		if err != nil {
+			log.Println("event marshal error:", err)
+			continue
+		}
+		client.enqueue(data)
 	}
 }
 
@@ -215,10 +303,8 @@ func (h *Hub) broadcastPresence(projectID string) {
 	h.Broadcast(Event{Type: "presence.updated", ProjectID: projectID, Presence: entries})
 }
 
-// writeEvent sends a single durable event to one connection, under that
-// connection's write lock.
-func (h *Hub) writeEvent(conn *websocket.Conn, client *wsClient, ev StoredEvent) {
-	data, err := json.Marshal(Event{
+func marshalStoredEvent(ev StoredEvent) ([]byte, error) {
+	return json.Marshal(Event{
 		Type:      "event",
 		ProjectID: ev.ProjectID,
 		Seq:       ev.Seq,
@@ -226,30 +312,26 @@ func (h *Hub) writeEvent(conn *websocket.Conn, client *wsClient, ev StoredEvent)
 		Payload:   ev.Payload,
 		Actor:     ev.Actor,
 	})
-	if err != nil {
-		log.Println("event marshal error:", err)
-		return
-	}
-	client.writeMu.Lock()
-	defer client.writeMu.Unlock()
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		log.Println("ws write error:", err)
-	}
 }
 
 // BroadcastEvent sends a durable event to every connected client. Callers
 // must only call this after the transaction that produced ev has
 // committed successfully — never before, and never if it rolled back.
 func (h *Hub) BroadcastEvent(ev StoredEvent) {
+	data, err := marshalStoredEvent(ev)
+	if err != nil {
+		log.Println("event marshal error:", err)
+		return
+	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	for conn, client := range h.clients {
-		h.writeEvent(conn, client, ev)
+	for _, client := range h.clients {
+		client.enqueue(data)
 	}
 }
 
-// Broadcast sends a pre-built envelope (presence updates, and the legacy
-// thin project.deleted notification) to every connected client.
+// Broadcast sends a pre-built envelope (presence updates, and the thin
+// project.created/deleted notifications) to every connected client.
 func (h *Hub) Broadcast(evt Event) {
 	data, err := json.Marshal(evt)
 	if err != nil {
@@ -258,12 +340,7 @@ func (h *Hub) Broadcast(evt Event) {
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	for conn, client := range h.clients {
-		client.writeMu.Lock()
-		err := conn.WriteMessage(websocket.TextMessage, data)
-		client.writeMu.Unlock()
-		if err != nil {
-			log.Println("ws write error:", err)
-		}
+	for _, client := range h.clients {
+		client.enqueue(data)
 	}
 }
