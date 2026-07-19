@@ -39,6 +39,9 @@ func main() {
 
 	r.Get("/ws", hub.ServeWS)
 
+	r.Get("/api/docs", serveDocs)
+	r.Get("/api/openapi.yaml", serveOpenAPISpec)
+
 	r.Route("/api/projects", func(r chi.Router) {
 		r.Get("/", api.listProjects)
 		r.Post("/", api.createProject)

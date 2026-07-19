@@ -1,0 +1,667 @@
+openapi: 3.0.3
+info:
+  title: Task Manager API
+  version: 1.0.0
+  description: |
+    Collaborative task management with near-real-time sync.
+
+    Every mutation runs in one Postgres transaction that claims the next
+    per-project sequence number and appends a row to an append-only event
+    log; committed events are broadcast to all clients over WebSocket
+    (`GET /ws`, protocol documented in the README). Clients detect gaps in
+    the sequence and catch up via `GET /api/projects/{projectID}/events`.
+
+    Mutating requests are attributed via the `X-Actor` header (the caller's
+    display name) and rate limited per caller (15/s, burst 30); over-limit
+    requests receive `429`. Reads are never throttled.
+servers:
+  - url: http://localhost:8080
+    description: Go server (direct)
+  - url: http://localhost:3000
+    description: Dockerized stack (nginx proxies /api and /ws to the server)
+
+tags:
+  - name: projects
+  - name: tasks
+  - name: comments
+  - name: events
+  - name: meta
+
+paths:
+  /health:
+    get:
+      tags: [meta]
+      summary: Liveness check
+      responses:
+        "200":
+          description: Server is up and connected to the database
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /api/projects/:
+    get:
+      tags: [projects]
+      summary: List projects
+      responses:
+        "200":
+          description: All projects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Project"
+    post:
+      tags: [projects]
+      summary: Create a project
+      parameters:
+        - $ref: "#/components/parameters/XActor"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewProject"
+      responses:
+        "201":
+          description: The created project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/projects/stats:
+    get:
+      tags: [projects]
+      summary: Per-project dashboard aggregates
+      description: |
+        Task/done/blocked counts, distinct assignees, and last-edited
+        timestamp for every project, computed in one SQL pass — so the
+        dashboard never downloads task lists just to render stat cards.
+      responses:
+        "200":
+          description: One entry per project
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProjectStats"
+
+  /api/projects/{projectID}/:
+    parameters:
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [projects]
+      summary: Get one project
+      description: |
+        Includes `lastSeq`, the project's current event sequence number — a
+        fresh client seeds its sync cursor from this before subscribing
+        over WebSocket.
+      responses:
+        "200":
+          description: The project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [projects]
+      summary: Update name/description/metadata
+      description: Absent fields are left untouched (field-granularity last-write-wins).
+      parameters:
+        - $ref: "#/components/parameters/XActor"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectPatch"
+      responses:
+        "200":
+          description: The updated project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    delete:
+      tags: [projects]
+      summary: Delete a project and everything under it
+      description: Cascades to the project's tasks, dependencies, comments, and event log.
+      parameters:
+        - $ref: "#/components/parameters/XActor"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/projects/{projectID}/tasks:
+    parameters:
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [tasks]
+      summary: List a project's tasks
+      description: |
+        Responds with `ETag: "<lastSeq>"` and `Cache-Control: no-cache`.
+        `lastSeq` is bumped by every mutation in the project, so it is a
+        version stamp for the whole task list: a conditional request for an
+        unchanged project answers `304` with no body.
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: The `ETag` from a previous response.
+      responses:
+        "200":
+          description: The project's tasks
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: The project's `lastSeq`, quoted.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+        "304":
+          description: Unchanged since the presented ETag; no body.
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [tasks]
+      summary: Create a task
+      parameters:
+        - $ref: "#/components/parameters/XActor"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewTask"
+      responses:
+        "201":
+          description: The created task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/projects/{projectID}/events:
+    parameters:
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [events]
+      summary: "Catch-up: events since a sequence number"
+      description: |
+        Events with `seq > after`, ascending, capped at 500 per request —
+        the endpoint clients use to fill a detected gap in the live stream.
+        A fresh client should seed its cursor from the project snapshot's
+        `lastSeq` rather than walking the log from zero.
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            default: 0
+          description: Return events with a sequence number strictly greater than this.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 500
+            maximum: 500
+          description: Maximum events to return; values outside (0, 500] are clamped to 500.
+      responses:
+        "200":
+          description: The missed events, in sequence order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StoredEvent"
+
+  /api/tasks/{taskID}/:
+    parameters:
+      - $ref: "#/components/parameters/TaskID"
+    get:
+      tags: [tasks]
+      summary: Get one task
+      responses:
+        "200":
+          description: The task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [tasks]
+      summary: Update title/status/assignedTo/configuration/dependencies
+      description: |
+        Absent fields are left untouched. A patch touching both scalar
+        fields and `dependencies` emits two events (`task.updated` and
+        `task.dependencies_changed`) in one transaction.
+
+        Dependency validation: self-references, unknown ids, cross-project
+        references, and cycles are rejected with `400`. Setting `status`
+        to `done` while any dependency is not done is rejected with `409`.
+      parameters:
+        - $ref: "#/components/parameters/XActor"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskPatch"
+      responses:
+        "200":
+          description: The updated task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The task cannot be completed while a dependency is incomplete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    delete:
+      tags: [tasks]
+      summary: Delete a task
+      description: |
+        Also removes the task from other tasks' dependency lists; the
+        emitted `task.deleted` event carries `removedFromDependenciesOf`
+        so clients can patch those tasks locally.
+      parameters:
+        - $ref: "#/components/parameters/XActor"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/tasks/{taskID}/comments:
+    parameters:
+      - $ref: "#/components/parameters/TaskID"
+    get:
+      tags: [comments]
+      summary: List a task's comments
+      responses:
+        "200":
+          description: The task's comments, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Comment"
+    post:
+      tags: [comments]
+      summary: Add a comment
+      parameters:
+        - $ref: "#/components/parameters/XActor"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewComment"
+      responses:
+        "201":
+          description: The created comment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/comments/{commentID}:
+    delete:
+      tags: [comments]
+      summary: Delete a comment
+      parameters:
+        - name: commentID
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/XActor"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+components:
+  parameters:
+    ProjectID:
+      name: projectID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TaskID:
+      name: taskID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    XActor:
+      name: X-Actor
+      in: header
+      required: false
+      schema:
+        type: string
+      description: |
+        Display name of the user making the change; stored as the emitted
+        event's `actor`. Missing or empty attributes the change to
+        "unknown" — where a real authenticated principal would slot in.
+
+  responses:
+    BadRequest:
+      description: Malformed body or invalid dependency reference
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Per-caller mutation rate limit exceeded (15/s, burst 30)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    Project:
+      type: object
+      required: [id, name, description, metadata, lastSeq, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        lastSeq:
+          type: integer
+          format: int64
+          description: Current event sequence number; bumped by every mutation in the project.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    NewProject:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    ProjectPatch:
+      type: object
+      description: Absent fields are left untouched.
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    TaskStatus:
+      type: string
+      enum: [todo, in_progress, done]
+      description: |
+        There is no stored "blocked" status — whether a task is blocked is
+        derived at read time from its dependencies' statuses.
+
+    TaskConfiguration:
+      type: object
+      required: [priority, description, tags, customFields]
+      properties:
+        priority:
+          type: string
+          example: medium
+        description:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        customFields:
+          type: object
+          additionalProperties: true
+
+    Task:
+      type: object
+      required: [id, projectId, title, status, assignedTo, configuration, dependencies, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        title:
+          type: string
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        assignedTo:
+          type: array
+          items:
+            type: string
+        configuration:
+          $ref: "#/components/schemas/TaskConfiguration"
+        dependencies:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Ids of tasks (in the same project) this task depends on.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    NewTask:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        assignedTo:
+          type: array
+          items:
+            type: string
+        configuration:
+          $ref: "#/components/schemas/TaskConfiguration"
+        dependencies:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    TaskPatch:
+      type: object
+      description: Absent fields are left untouched.
+      properties:
+        title:
+          type: string
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        assignedTo:
+          type: array
+          items:
+            type: string
+        configuration:
+          $ref: "#/components/schemas/TaskConfiguration"
+        dependencies:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    Comment:
+      type: object
+      required: [id, taskId, content, author, timestamp]
+      properties:
+        id:
+          type: string
+          format: uuid
+        taskId:
+          type: string
+          format: uuid
+        content:
+          type: string
+        author:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    NewComment:
+      type: object
+      required: [content, author]
+      properties:
+        content:
+          type: string
+        author:
+          type: string
+
+    ProjectStats:
+      type: object
+      required: [projectId, total, done, blocked, assignees, lastEdited]
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        total:
+          type: integer
+        done:
+          type: integer
+        blocked:
+          type: integer
+          description: Tasks with at least one dependency that is not done.
+        assignees:
+          type: array
+          items:
+            type: string
+        lastEdited:
+          type: string
+          format: date-time
+
+    StoredEvent:
+      type: object
+      required: [projectId, seq, eventType, payload, actor, createdAt]
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        seq:
+          type: integer
+          format: int64
+          description: Gapless, ascending per project; claimed atomically with the mutation.
+        eventType:
+          type: string
+          enum:
+            - task.created
+            - task.updated
+            - task.deleted
+            - task.dependencies_changed
+            - comment.added
+            - comment.deleted
+            - project.updated
+        payload:
+          description: Event-type-specific payload (see server/events.go / the generated TS contract for exact shapes).
+          type: object
+          additionalProperties: true
+        actor:
+          type: string
+        createdAt:
+          type: string
+          format: date-time

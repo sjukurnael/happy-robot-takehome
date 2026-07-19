@@ -4,7 +4,7 @@ DB_URL = postgres://app:app@localhost:5432/taskman?sslmode=disable
 MIGRATE_IMG = migrate/migrate:v4.17.1
 MIGRATIONS_DIR = $(CURDIR)/server/migrations
 
-.PHONY: up down test gen-types db-up db-migrate db-seed db-reset db-psql
+.PHONY: up down test test-unit test-e2e gen-types db-up db-migrate db-seed db-reset db-psql
 
 # Full stack in Docker: Postgres + migrations + Go server + built frontend.
 up:
@@ -19,6 +19,17 @@ down:
 # suite itself), so dev data is never touched.
 test: db-up
 	cd server && go test ./...
+
+# Unit tests for the client's pure logic (Vitest). Needs client
+# dependencies installed (npm install in client/ once).
+test-unit:
+	cd client && npm test
+
+# End-to-end tests (Playwright) against the full Docker stack — brings the
+# stack up first. Needs client dependencies plus a one-time browser
+# download: cd client && npx playwright install chromium
+test-e2e: up
+	cd client && npx playwright test
 
 # Regenerate the TypeScript side of the API contract from the Go structs
 # (server/tygo.yaml -> client/src/generated/api.ts). Run after changing

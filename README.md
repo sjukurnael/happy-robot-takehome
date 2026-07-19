@@ -1,5 +1,7 @@
 # Task Manager
 
+[![CI](https://github.com/sjukurnael/happy-robot-takehome/actions/workflows/ci.yml/badge.svg)](https://github.com/sjukurnael/happy-robot-takehome/actions/workflows/ci.yml)
+
 Collaborative task management system with near-real-time sync across clients.
 
 - **Backend**: Go (`server/`) — chi router, Postgres-backed store (via `pgx`), WebSocket hub for live updates, an append-only event log for efficient sync
@@ -39,27 +41,32 @@ path. For hacking on the code itself, see
 
 ```
 .
+├── .github/workflows/ci.yml   # CI: backend, frontend, and e2e jobs on every push
 ├── docker-compose.yml     # db only (default) or full stack (--profile app)
-├── Makefile                # up / down / db-up / db-migrate / db-seed / db-reset / db-psql
+├── Makefile                # up / down / test / test-unit / test-e2e / db-* targets
 ├── server/                 # Go backend
 │   ├── Dockerfile           # multi-stage build for the full-stack compose profile
 │   ├── main.go              # entrypoint: DB pool, router, route table
 │   ├── db.go                 # pgxpool connection + startup health check
 │   ├── models.go              # the wire contract: domain structs, patches, stats, WS envelope
 │   ├── tygo.yaml               # config for generating the TS side of that contract (make gen-types)
-│   ├── store.go                # all Postgres reads/writes; the only file that writes SQL
-│   ├── validation.go            # dependency cycle / cross-project / completion checks
-│   ├── events.go                 # event type constants, payload structs, recordEvent, ListEventsSince
-│   ├── handlers.go                # HTTP handlers: decode request -> call store -> broadcast -> respond
-│   ├── ratelimit.go                # per-caller token bucket on mutating requests
-│   ├── store_test.go               # integration tests: validation, event-log atomicity, concurrency
-│   ├── hub.go                      # WebSocket registry, presence, event broadcast + subscribe-time replay
+│   ├── openapi.yaml             # OpenAPI 3 spec, embedded in the binary (see docs.go)
+│   ├── docs.go                   # serves the spec + Swagger UI at /api/docs
+│   ├── store.go                   # all Postgres reads/writes; the only file that writes SQL
+│   ├── validation.go               # dependency cycle / cross-project / completion checks
+│   ├── events.go                    # event type constants, payload structs, recordEvent, ListEventsSince
+│   ├── handlers.go                   # HTTP handlers: decode request -> call store -> broadcast -> respond
+│   ├── ratelimit.go                   # per-caller token bucket on mutating requests
+│   ├── store_test.go                   # integration tests: validation, event-log atomicity, concurrency
+│   ├── hub.go                           # WebSocket registry, presence, event broadcast + subscribe-time replay
 │   ├── migrations/0001_init.{up,down}.sql   # schema (golang-migrate)
 │   └── seed/seed.sql                          # demo projects/tasks/comments
 ├── client/
 │   ├── Dockerfile           # build + nginx image for the full-stack compose profile
-│   └── nginx.conf           # serves the SPA, proxies /api and /ws to the server
-└── client/src/              # React frontend
+│   ├── nginx.conf            # serves the SPA, proxies /api and /ws to the server
+│   ├── playwright.config.ts   # e2e runner config (expects the stack at :3000)
+│   └── e2e/                    # Playwright suite: lifecycle, two-browser sync, reconnect replay
+└── client/src/              # React frontend (pure helpers have Vitest tests alongside: *.test.ts)
     ├── main.tsx, App.tsx     # entry point + top-level view switch (project list <-> project board)
     ├── generated/api.ts        # GENERATED from the Go structs via tygo — the structural API contract
     ├── types.ts                # re-exports generated/api.ts + refinements Go can't express (unions)
@@ -128,14 +135,20 @@ rejected request — e.g. moving a blocked task to Done).
 
 ### REST API reference
 
-All routes are rooted at `/api`; all mutating routes accept an `X-Actor`
-header (see [Sync](#sync-the-event-log)) and every response/request body is
-JSON.
+**Interactive docs: <http://localhost:3000/api/docs>** (Swagger UI over the
+OpenAPI 3 spec at `/api/openapi.yaml` — `server/openapi.yaml`, embedded in
+the binary, covering every schema, status code, and the ETag/rate-limit
+behavior).
+
+API routes are rooted at `/api` (`/health` and `/ws` sit at the server
+root); all mutating routes accept an `X-Actor` header (see
+[Sync](#sync-the-event-log)) and every response/request body is JSON.
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | liveness check |
 | GET | `/ws` | WebSocket upgrade |
+| GET | `/api/docs` | Swagger UI (spec: `/api/openapi.yaml`) |
 | GET | `/projects/` | list projects |
 | POST | `/projects/` | create project |
 | GET | `/projects/stats` | per-project dashboard aggregates (task/done/blocked counts, assignees, last edited) in one SQL pass |
@@ -348,9 +361,26 @@ missed. Dead connections are detected by ping/pong keepalive (30s pings,
 
 ## Testing
 
+Three tiers — unit, integration, end-to-end — all run by CI on every push
+(see [CI](#ci) below):
+
 ```sh
-make test    # brings up Postgres, then runs the Go suite
+make test        # integration: Go suite against a real Postgres
+make test-unit   # unit: Vitest over the client's pure logic
+make test-e2e    # e2e: Playwright against the full Docker stack (runs `make up` first)
 ```
+
+The e2e tier needs client deps plus a one-time browser download
+(`cd client && npm install && npx playwright install chromium`).
+
+### Unit tests
+
+`client/src/*.test.ts` (Vitest) cover the client's pure logic in
+isolation: blocked-task derivation (including the fail-safe for dangling
+dependency ids mid-sync), relative-timestamp formatting boundaries, and
+the deterministic avatar identity helpers.
+
+### Integration tests
 
 Integration tests (`server/store_test.go`) run against a real Postgres —
 the suite creates and migrates its own `taskman_test` database, so dev
@@ -373,6 +403,42 @@ meaningfully exercise:
 - **Contract details:** metadata/JSONB roundtrips, minimal `task.updated`
   payloads, one-PATCH-two-events for scalar+dependency changes, catch-up
   pagination, and the stats aggregates.
+
+### End-to-end tests
+
+`client/e2e/` (Playwright) drives the real composed stack — nginx-served
+client, Go server, Postgres — through a real browser, covering the seams
+nothing else can: project/task/comment lifecycles through the actual UI,
+dependency blocking (a blocked task's completion is rejected with the
+error surfaced, then succeeds once the dependency is done), and
+drag-and-drop persistence across a reload.
+
+The realtime specs are the flagship: each runs **two independent browser
+contexts** (separate sessions and identities, like two people on two
+machines) and asserts the core promise of the system — a project, task,
+status change, or comment made in one browser appears in the other with
+no reload; presence avatars show who's viewing the board and the open
+task. A third spec simulates a genuine network drop (severing the
+WebSocket + offline emulation), has the second user keep working, and
+asserts the reconnecting client catches up via seq replay — the sync
+design's recovery path, exercised end to end.
+
+Tests create uniquely-named projects and clean up via the API, so they
+can run against a database that also holds dev/seed data.
+
+### CI
+
+`.github/workflows/ci.yml` runs three jobs on every push and PR:
+
+- **backend** — `go vet` + the integration suite against a Postgres
+  service container, plus a contract-drift check: regenerates the tygo
+  types and fails if `client/src/generated/api.ts` doesn't match the Go
+  structs.
+- **frontend** — lint (oxlint), unit tests, and a full type-check +
+  production build.
+- **e2e** — builds and starts the same Docker images `make up` uses, then
+  runs the Playwright suite against them; gated on the first two jobs.
+  Server logs and the Playwright report are uploaded on failure.
 
 ## How I'd scale it over time
 
@@ -433,13 +499,15 @@ Roughly in the order the bottlenecks would appear:
   list and the `/projects/stats` aggregates — never task lists), so the
   simplicity costs little. Comment threads similarly refetch the open
   thread on comment events; the payloads are tiny.
-- **Model types are generated; route wiring is hand-typed.** The
+- **Model types are generated; route wiring is hand-maintained.** The
   structural contract (every struct, field name, and payload shape) is
-  generated from the Go source via tygo, so it can't drift. What remains
-  hand-written is the route wiring in `api.ts` — which endpoint returns
-  which type. At 16 endpoints that's easy to eyeball; with more surface
-  area (or more clients) I'd move up to OpenAPI so the routes themselves
-  are part of the machine-checked contract and the docs come for free.
+  generated from the Go source via tygo — CI fails if the generated file
+  drifts from the structs. The routes themselves live in two hand-written
+  places: the fetch wrapper in `api.ts` and the OpenAPI spec behind
+  `/api/docs`. Both are covered by tests (e2e exercises every endpoint
+  the UI uses) but neither is machine-derived from the router; with more
+  surface area or more clients I'd generate the spec from the chi routes
+  (or the routes from the spec) so that layer is machine-checked too.
 - **No auth.** Identity is a self-chosen display name per tab
   (`sessionStorage`) — the right scope for demonstrating sync, and the
   `X-Actor` header/actor column is where a real authenticated principal
