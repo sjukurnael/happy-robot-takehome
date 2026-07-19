@@ -122,6 +122,41 @@ export interface TaskPatch {
   dependencies: string[];
 }
 /**
+ * BreakdownSuggestion is one AI-proposed subtask. DependsOn holds indices
+ * into the same suggestions array — the subtasks don't have IDs yet; the
+ * server maps indices to real UUIDs when the batch is created.
+ */
+export interface BreakdownSuggestion {
+  title: string;
+  description: string;
+  priority: string;
+  tags: string[];
+  dependsOn: number /* int */[];
+}
+/**
+ * BreakdownResponse is the suggest-phase response — pure suggestions,
+ * nothing persisted. The user reviews (and may deselect) these before the
+ * apply phase creates anything.
+ */
+export interface BreakdownResponse {
+  suggestions: BreakdownSuggestion[];
+}
+/**
+ * BreakdownApplyRequest is the apply-phase body: the suggestions the user
+ * kept, re-indexed by the client so DependsOn refers to positions in
+ * Subtasks.
+ */
+export interface BreakdownApplyRequest {
+  subtasks: BreakdownSuggestion[];
+}
+/**
+ * BreakdownApplyResponse returns the created subtasks; the board itself
+ * updates via the task.created / task.dependencies_changed events.
+ */
+export interface BreakdownApplyResponse {
+  created: (Task | undefined)[];
+}
+/**
  * ProjectStats is the dashboard's per-project aggregate — computed in one
  * SQL pass instead of shipping every task of every project to the client.
  * "Blocked" mirrors client/src/taskUtils.ts exactly: a task counts as

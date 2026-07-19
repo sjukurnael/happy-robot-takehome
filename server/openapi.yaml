@@ -25,6 +25,7 @@ tags:
   - name: tasks
   - name: comments
   - name: events
+  - name: ai
   - name: meta
 
 paths:
@@ -365,6 +366,83 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /api/tasks/{taskID}/breakdown:
+    post:
+      tags: [ai]
+      summary: "AI breakdown, phase 1: suggest subtasks"
+      description: |
+        Asks Claude (`claude-opus-4-8`, structured output) to propose 3–8
+        subtasks for the task, with ordering expressed as `dependsOn`
+        indices into the returned array. **Nothing is persisted** — the
+        client shows the suggestions for review and only the `apply`
+        endpoint below mutates. Expect this to take tens of seconds; the
+        server caps the model call at 120s.
+
+        Requires `ANTHROPIC_API_KEY` on the server; without it this
+        endpoint answers `503` and everything else remains functional.
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+        - $ref: "#/components/parameters/XActor"
+      responses:
+        "200":
+          description: Validated suggestions (index deps in range, acyclic)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BreakdownResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          description: The model returned unusable output; retrying is safe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AIUnavailable"
+
+  /api/tasks/{taskID}/breakdown/apply:
+    post:
+      tags: [ai]
+      summary: "AI breakdown, phase 2: create the reviewed subtasks"
+      description: |
+        Creates the submitted subtasks in **one transaction**: all tasks
+        inserted, intra-batch `dependsOn` indices mapped onto the new task
+        ids, and the parent task's dependency list extended with the
+        batch's terminal subtasks — making the parent the finish line (it
+        can't be completed until the breakdown is done). Emits one
+        `task.created` event per subtask plus one
+        `task.dependencies_changed` for the parent, with contiguous
+        sequence numbers; a failed batch creates nothing and burns no seq.
+
+        The batch is validated from scratch (index range, self-references,
+        cycles, ≤10 subtasks, non-empty titles) — this endpoint is
+        AI-free and works without an API key.
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+        - $ref: "#/components/parameters/XActor"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BreakdownApplyRequest"
+      responses:
+        "201":
+          description: The created subtasks, in submission order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BreakdownApplyResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
   /api/comments/{commentID}:
     delete:
       tags: [comments]
@@ -427,6 +505,14 @@ components:
             $ref: "#/components/schemas/Error"
     RateLimited:
       description: Per-caller mutation rate limit exceeded (15/s, burst 30)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    AIUnavailable:
+      description: |
+        AI is not configured on this server (`ANTHROPIC_API_KEY` unset) or
+        the AI service is temporarily unavailable.
       content:
         application/json:
           schema:
@@ -634,6 +720,61 @@ components:
         lastEdited:
           type: string
           format: date-time
+
+    BreakdownSuggestion:
+      type: object
+      required: [title, description, priority, tags, dependsOn]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        priority:
+          type: string
+          enum: [low, medium, high]
+        tags:
+          type: array
+          items:
+            type: string
+        dependsOn:
+          type: array
+          items:
+            type: integer
+          description: |
+            Zero-based indices into the sibling suggestions array naming
+            which of the other subtasks in this batch must be completed
+            first — the subtasks have no ids until they're created.
+
+    BreakdownResponse:
+      type: object
+      required: [suggestions]
+      properties:
+        suggestions:
+          type: array
+          items:
+            $ref: "#/components/schemas/BreakdownSuggestion"
+
+    BreakdownApplyRequest:
+      type: object
+      required: [subtasks]
+      properties:
+        subtasks:
+          type: array
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/BreakdownSuggestion"
+          description: |
+            The suggestions the user kept, re-indexed so every `dependsOn`
+            refers to a position in this array.
+
+    BreakdownApplyResponse:
+      type: object
+      required: [created]
+      properties:
+        created:
+          type: array
+          items:
+            $ref: "#/components/schemas/Task"
 
     StoredEvent:
       type: object

@@ -25,7 +25,11 @@ func main() {
 
 	store := NewStore(pool)
 	hub := NewHub(store)
-	api := &API{store: store, hub: hub}
+	ai := newAIClient()
+	if !ai.enabled {
+		log.Println("AI breakdown disabled: ANTHROPIC_API_KEY not set")
+	}
+	api := &API{store: store, hub: hub, ai: ai}
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -62,6 +66,8 @@ func main() {
 		r.Delete("/", api.deleteTask)
 		r.Get("/comments", api.listComments)
 		r.Post("/comments", api.createComment)
+		r.Post("/breakdown", api.breakdownTask)
+		r.Post("/breakdown/apply", api.applyBreakdown)
 	})
 
 	r.Delete("/api/comments/{commentID}", api.deleteComment)

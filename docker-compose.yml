@@ -48,6 +48,9 @@ services:
     profiles: [app]
     environment:
       DATABASE_URL: postgres://app:app@db:5432/taskman?sslmode=disable
+      # Optional: enables the AI task-breakdown endpoint. Unset, the app
+      # runs fully functional and that one endpoint answers 503.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy

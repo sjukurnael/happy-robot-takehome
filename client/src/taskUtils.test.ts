@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { Task } from './types'
-import { countBlocked, isTaskBlocked } from './taskUtils'
+import type { BreakdownSuggestion, Task } from './types'
+import { countBlocked, isTaskBlocked, remapSelectedSuggestions } from './taskUtils'
 
 function makeTask(overrides: Partial<Task> & Pick<Task, 'id'>): Task {
   return {
@@ -66,5 +66,47 @@ describe('countBlocked', () => {
     const test = makeTask({ id: 'test', status: 'in_progress', dependencies: ['build'] })
     const deploy = makeTask({ id: 'deploy', dependencies: ['build', 'test'] })
     expect(countBlocked([build, test, deploy])).toBe(1)
+  })
+})
+
+describe('remapSelectedSuggestions', () => {
+  function makeSuggestion(title: string, dependsOn: number[] = []): BreakdownSuggestion {
+    return { title, description: '', priority: 'medium', tags: [], dependsOn }
+  }
+
+  it('is the identity when everything is selected', () => {
+    const subs = [makeSuggestion('a'), makeSuggestion('b', [0]), makeSuggestion('c', [0, 1])]
+    expect(remapSelectedSuggestions(subs, [true, true, true])).toEqual(subs)
+  })
+
+  it('shifts indices when an earlier suggestion is deselected', () => {
+    // Deselecting b: c's dep on a (index 0) stays 0, its dep on b is dropped.
+    const subs = [makeSuggestion('a'), makeSuggestion('b'), makeSuggestion('c', [0, 1])]
+    const out = remapSelectedSuggestions(subs, [true, false, true])
+    expect(out.map((s) => s.title)).toEqual(['a', 'c'])
+    expect(out[1].dependsOn).toEqual([0])
+  })
+
+  it('drops dependencies on deselected suggestions', () => {
+    const subs = [makeSuggestion('a'), makeSuggestion('b', [0])]
+    const out = remapSelectedSuggestions(subs, [false, true])
+    expect(out).toEqual([makeSuggestion('b')])
+  })
+
+  it('remaps a chain that survives around a deselected middle', () => {
+    const subs = [
+      makeSuggestion('a'),
+      makeSuggestion('b', [0]),
+      makeSuggestion('c', [0]),
+      makeSuggestion('d', [1, 2]),
+    ]
+    // Drop c: d keeps its dep on b, which is still at index 1.
+    const out = remapSelectedSuggestions(subs, [true, true, false, true])
+    expect(out.map((s) => s.title)).toEqual(['a', 'b', 'd'])
+    expect(out[2].dependsOn).toEqual([1])
+  })
+
+  it('returns an empty batch when nothing is selected', () => {
+    expect(remapSelectedSuggestions([makeSuggestion('a')], [false])).toEqual([])
   })
 })

@@ -6,6 +6,7 @@ import { viewersOfTask } from './Presence'
 import { Avatar } from './Avatar'
 import { formatRelativeTime } from './format'
 import { live } from './live'
+import { BreakdownModal } from './BreakdownModal'
 
 const PRIORITIES = ['low', 'medium', 'high']
 const STATUSES: TaskStatus[] = ['todo', 'in_progress', 'done']
@@ -37,6 +38,7 @@ export function TaskPanel({
   const [tags, setTags] = useState('')
   const [assignees, setAssignees] = useState('')
   const [depPickerOpen, setDepPickerOpen] = useState(false)
+  const [breakdownOpen, setBreakdownOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // Reseed local draft fields only when switching to a different task —
@@ -164,6 +166,9 @@ export function TaskPanel({
             </span>
           )}
           <div className="panel-header-actions">
+            <button type="button" className="breakdown-btn" onClick={() => setBreakdownOpen(true)}>
+              ✨ Break down with AI
+            </button>
             <button type="button" className="delete-btn" onClick={handleDeleteTask}>
               Delete
             </button>
@@ -327,6 +332,8 @@ export function TaskPanel({
             Send
           </button>
         </form>
+
+        {breakdownOpen && <BreakdownModal task={task} onClose={() => setBreakdownOpen(false)} />}
       </div>
     </div>
   )

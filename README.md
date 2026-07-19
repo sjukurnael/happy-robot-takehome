@@ -14,6 +14,7 @@ Collaborative task management system with near-real-time sync across clients.
 - [Technology choices](#technology-choices)
 - [Database](#database)
 - [Sync: the event log](#sync-the-event-log)
+- [AI task breakdown](#ai-task-breakdown)
 - [Caching, rate limiting, and backpressure](#caching-rate-limiting-and-backpressure)
 - [Testing](#testing)
 - [How I'd scale it over time](#how-id-scale-it-over-time)
@@ -25,12 +26,17 @@ Collaborative task management system with near-real-time sync across clients.
 With Docker Desktop running:
 
 ```sh
-make up       # builds + starts Postgres, migrations, Go server, frontend
-make db-seed  # optional: load demo projects/tasks/comments
+cp .env.example .env   # optional: add an Anthropic API key to enable the AI breakdown
+make up                # builds + starts Postgres, migrations, Go server, frontend
+make db-seed           # optional: load demo projects/tasks/comments
 ```
 
 Then open <http://localhost:3000> — open it in two browser windows to see
-the real-time sync and presence. `make down` stops everything;
+the real-time sync and presence. To try the **AI task breakdown** (the
+"✨ Break down with AI" button on any task), put an `ANTHROPIC_API_KEY`
+in `.env` before `make up` — Docker Compose reads it automatically; see
+[AI task breakdown](#ai-task-breakdown). Without a key everything else
+works and that one button explains it's not configured. `make down` stops everything;
 `make db-reset` wipes the database. No local Go or Node needed for this
 path. For hacking on the code itself, see
 [Running locally (native dev)](#running-locally-native-dev).
@@ -53,7 +59,8 @@ path. For hacking on the code itself, see
 │   ├── openapi.yaml             # OpenAPI 3 spec, embedded in the binary (see docs.go)
 │   ├── docs.go                   # serves the spec + Swagger UI at /api/docs
 │   ├── store.go                   # all Postgres reads/writes; the only file that writes SQL
-│   ├── validation.go               # dependency cycle / cross-project / completion checks
+│   ├── ai.go                       # Claude client for the AI task breakdown (prompt, schema, output validation)
+│   ├── validation.go               # dependency cycle / cross-project / completion checks + batch index-graph checks
 │   ├── events.go                    # event type constants, payload structs, recordEvent, ListEventsSince
 │   ├── handlers.go                   # HTTP handlers: decode request -> call store -> broadcast -> respond
 │   ├── ratelimit.go                   # per-caller token bucket on mutating requests
@@ -78,6 +85,7 @@ path. For hacking on the code itself, see
     ├── ProjectDetail.tsx                 # board page — owns tasks/project state and the sync/gap-detection logic
     ├── KanbanBoard.tsx, TaskCard.tsx       # drag-and-drop board (dnd-kit)
     ├── TaskPanel.tsx                        # task detail side panel: fields, dependencies, comments
+    ├── BreakdownModal.tsx                    # AI breakdown review dialog (suggest -> review -> apply)
     ├── NewTaskForm.tsx                       # task creation modal
     ├── Presence.tsx, Avatar.tsx,
     │   IdentityBadge.tsx                      # "who's here" UI (viewer avatars, rename-yourself badge)
@@ -161,6 +169,8 @@ root); all mutating routes accept an `X-Actor` header (see
 | GET | `/tasks/{taskID}/` | get one task |
 | PATCH | `/tasks/{taskID}/` | update title/status/assignedTo/configuration/dependencies |
 | DELETE | `/tasks/{taskID}/` | delete a task |
+| POST | `/tasks/{taskID}/breakdown` | AI: suggest subtasks for a task (no mutation; 503 without `ANTHROPIC_API_KEY`, see [AI task breakdown](#ai-task-breakdown)) |
+| POST | `/tasks/{taskID}/breakdown/apply` | create reviewed subtasks + dependencies atomically; parent becomes the finish line |
 | GET | `/tasks/{taskID}/comments` | list a task's comments |
 | POST | `/tasks/{taskID}/comments` | add a comment |
 | DELETE | `/comments/{commentID}` | delete a comment |
@@ -323,6 +333,51 @@ snapshot instead of replaying thousands of events" fallback — noted as a
 TODO in `server/hub.go` (`replayTo`) and `client/src/ProjectDetail.tsx`
 (`fillGap`), since ordinary reconnect gaps are small and `ListEventsSince`
 caps a single query at 500 rows regardless.
+
+## AI task breakdown
+
+The one AI feature (extended challenge, option 4): every task has a
+"✨ Break down with AI" button that asks Claude to decompose it into
+subtasks with dependencies. It's built as **two phases** around the
+existing sync machinery rather than beside it:
+
+1. **Suggest** — `POST /api/tasks/:id/breakdown` calls Claude
+   (`claude-opus-4-8` with adaptive thinking and a structured-output JSON
+   schema, via the official Go SDK) with the task's title/description and
+   the project's other task titles (so it doesn't propose duplicates). The
+   model returns 3–8 subtasks whose ordering is expressed as `dependsOn`
+   **indices into its own array** — the subtasks don't have IDs yet.
+   Nothing is persisted; the model's output is validated server-side like
+   any untrusted input (index range, self-references, cycles, count ≤ 10)
+   before it's returned.
+2. **Review + apply** — the client shows the suggestions in a modal where
+   the user can deselect any of them (deselection remaps the surviving
+   indices — `remapSelectedSuggestions` in `taskUtils.ts`, unit-tested).
+   One click posts the kept batch to `POST /api/tasks/:id/breakdown/apply`,
+   which runs **one transaction**: insert every subtask, map indices onto
+   the new UUIDs and insert the dependency edges, and extend the original
+   task's dependencies with the batch's *terminal* subtasks (the ones
+   nothing else in the batch depends on) — the original becomes the
+   **finish line**, blocked until the whole breakdown is done. The batch
+   re-validates from scratch; the client could send anything.
+
+The payoff of the two-phase design: the expensive, slow, fallible AI call
+is a pure read the user can review, retry, or abandon — while the mutation
+is deterministic, atomic, AI-free, and rides the **existing event log
+unchanged**: the apply emits N × `task.created` + 1 ×
+`task.dependencies_changed` with contiguous seqs, so every connected
+client's board updates live through the same `applyEvent` path as any
+manual edit, with zero new sync code. A failed batch burns no seqs.
+
+**Configuration.** `cp .env.example .env` and set `ANTHROPIC_API_KEY`
+there — Docker Compose reads `.env` automatically, so `make up` just
+works (an exported env var also works, and native dev sets it in the
+shell running `go run .`; `.env` is gitignored). Without a key
+the app is fully functional and the suggest endpoint answers a clear
+`503`, which the modal surfaces with a retry button — CI and the e2e
+suite run keyless and exercise exactly that degraded path. The nginx
+proxy's `/api/` read timeout is raised to 180s because the model call can
+legitimately take a minute (the server caps it at 120s).
 
 ## Caching, rate limiting, and backpressure
 

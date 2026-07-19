@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -12,7 +13,86 @@ var (
 	ErrDependencyNotFound     = errors.New("dependency task not found")
 	ErrCrossProjectDependency = errors.New("dependency must belong to the same project")
 	ErrBlockedByDependency    = errors.New("blocked by an incomplete dependency")
+	ErrInvalidBatch           = errors.New("invalid subtask batch")
 )
+
+// validateSuggestions checks a subtask batch before any of it touches the
+// database: bounded size, non-empty titles, normalized priorities, and a
+// well-formed dependency graph over array indices (in range, no self-refs,
+// no duplicates, acyclic). It mutates subs in place to normalize priority
+// and nil slices. Used for both AI output (untrusted model) and the apply
+// endpoint's body (untrusted client) — the index graph is validated here,
+// in memory, because these tasks have no IDs yet for validateDependencies
+// to check against the DB.
+func validateSuggestions(subs []BreakdownSuggestion) error {
+	if len(subs) == 0 {
+		return fmt.Errorf("%w: no subtasks", ErrInvalidBatch)
+	}
+	if len(subs) > 10 {
+		return fmt.Errorf("%w: more than 10 subtasks", ErrInvalidBatch)
+	}
+	for i := range subs {
+		subs[i].Title = strings.TrimSpace(subs[i].Title)
+		if len(subs[i].Title) == 0 || len([]rune(subs[i].Title)) > 200 {
+			return fmt.Errorf("%w: subtask %d has an empty or overlong title", ErrInvalidBatch, i)
+		}
+		switch subs[i].Priority {
+		case "low", "medium", "high":
+		default:
+			subs[i].Priority = "medium"
+		}
+		if subs[i].Tags == nil {
+			subs[i].Tags = []string{}
+		}
+		seen := map[int]bool{}
+		deduped := subs[i].DependsOn[:0]
+		for _, d := range subs[i].DependsOn {
+			if d < 0 || d >= len(subs) {
+				return fmt.Errorf("%w: subtask %d dependsOn index %d out of range", ErrInvalidBatch, i, d)
+			}
+			if d == i {
+				return fmt.Errorf("%w: subtask %d depends on itself", ErrInvalidBatch, i)
+			}
+			if !seen[d] {
+				seen[d] = true
+				deduped = append(deduped, d)
+			}
+		}
+		subs[i].DependsOn = deduped
+	}
+
+	// Cycle check over the index graph, mirroring validateDependencies'
+	// walk but on positions instead of UUIDs.
+	const (
+		unvisited = 0
+		inStack   = 1
+		done      = 2
+	)
+	state := make([]int, len(subs))
+	var walk func(i int) bool
+	walk = func(i int) bool {
+		if state[i] == inStack {
+			return true
+		}
+		if state[i] == done {
+			return false
+		}
+		state[i] = inStack
+		for _, next := range subs[i].DependsOn {
+			if walk(next) {
+				return true
+			}
+		}
+		state[i] = done
+		return false
+	}
+	for i := range subs {
+		if walk(i) {
+			return fmt.Errorf("%w: %s", ErrInvalidBatch, ErrCyclicDependency)
+		}
+	}
+	return nil
+}
 
 // validateDependencies checks that a proposed dependency list for taskID is
 // well-formed: every dependency exists, belongs to projectID, isn't taskID

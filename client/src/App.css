@@ -1100,3 +1100,101 @@
     gap: 20px;
   }
 }
+
+/* --- AI breakdown --- */
+
+.breakdown-btn {
+  background: none;
+  color: var(--text);
+  opacity: 0.75;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.breakdown-btn:hover {
+  opacity: 1;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.breakdown-modal {
+  width: min(560px, 92vw);
+}
+
+.breakdown-loading {
+  padding: 24px 0;
+  text-align: center;
+}
+
+.breakdown-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.breakdown-error p {
+  margin: 0;
+}
+
+.breakdown-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin: 8px 0;
+}
+
+.breakdown-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.breakdown-row input[type='checkbox'] {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+.breakdown-row.deselected {
+  opacity: 0.45;
+}
+
+.breakdown-row-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.breakdown-row-body p {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
+.breakdown-row-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.breakdown-priority {
+  font-size: 11px;
+  padding: 1px 8px;
+}
+
+.breakdown-deps {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-faint);
+}

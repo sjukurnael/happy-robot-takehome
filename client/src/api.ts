@@ -1,4 +1,14 @@
-import type { Comment, Project, ProjectStats, StoredEvent, Task, TaskStatus } from './types'
+import type {
+  BreakdownApplyResponse,
+  BreakdownResponse,
+  BreakdownSuggestion,
+  Comment,
+  Project,
+  ProjectStats,
+  StoredEvent,
+  Task,
+  TaskStatus,
+} from './types'
 import { getIdentity } from './identity'
 
 // Carries the HTTP status alongside the server's error message so callers
@@ -73,6 +83,20 @@ export const api = {
     }>,
   ) => request<Task>(`/api/tasks/${id}/`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteTask: (id: string) => request<void>(`/api/tasks/${id}/`, { method: 'DELETE' }),
+
+  // AI breakdown, phase 1: ask Claude for subtask suggestions. Pure read —
+  // nothing is persisted until applyBreakdown. Slow (the model thinks for
+  // tens of seconds); callers should show a loading state.
+  breakdownTask: (taskId: string) =>
+    request<BreakdownResponse>(`/api/tasks/${taskId}/breakdown`, { method: 'POST' }),
+  // Phase 2: create the reviewed subtasks atomically. dependsOn indices
+  // must refer to positions in the submitted array (see
+  // remapSelectedSuggestions in taskUtils.ts).
+  applyBreakdown: (taskId: string, subtasks: BreakdownSuggestion[]) =>
+    request<BreakdownApplyResponse>(`/api/tasks/${taskId}/breakdown/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ subtasks }),
+    }),
 
   listComments: (taskId: string) => request<Comment[]>(`/api/tasks/${taskId}/comments`),
   createComment: (taskId: string, data: { content: string; author: string }) =>

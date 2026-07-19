@@ -482,6 +482,138 @@ func (s *Store) DeleteTask(ctx context.Context, id string, actor string) (projec
 	return projectID, []StoredEvent{ev}, nil
 }
 
+// CreateTaskBatch creates subtasks of parentID from subs in ONE
+// transaction: all tasks are inserted in order (collecting their new IDs),
+// intra-batch dependency edges are inserted by mapping each suggestion's
+// DependsOn indices onto those IDs, and the parent's dependency list is
+// extended with the batch's terminal subtasks — the ones no other subtask
+// depends on — so the parent becomes the finish line: it can't be
+// completed until the whole breakdown is done. Emits one task.created
+// event per subtask plus one task.dependencies_changed for the parent, all
+// with contiguous seqs in the same transaction; if anything fails, the
+// rollback burns no seq and leaves no partial batch.
+//
+// The intra-batch edges are validated in memory by validateSuggestions
+// (index range / self-refs / cycles) rather than validateDependencies —
+// these tasks have no IDs before insert, and edges among brand-new rows
+// can't close a cycle through existing tasks. The parent edge is the one
+// that touches the pre-existing graph, so it does go through
+// validateDependencies inside the transaction.
+func (s *Store) CreateTaskBatch(ctx context.Context, parentID string, subs []BreakdownSuggestion, actor string) ([]*Task, []StoredEvent, error) {
+	if err := validateSuggestions(subs); err != nil {
+		return nil, nil, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock the parent row first (plain SELECT — FOR UPDATE can't combine
+	// with the aggregate query), then load its full state including its
+	// current dependency list.
+	var locked string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM tasks WHERE id = $1::uuid FOR UPDATE`, parentID).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, ErrNotFound
+		}
+		return nil, nil, err
+	}
+	parent, err := scanTask(tx.QueryRow(ctx, taskSelectBase+` WHERE t.id = $1::uuid GROUP BY t.id`, parentID))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ids := make([]string, len(subs))
+	for i, sub := range subs {
+		configuration, err := json.Marshal(TaskConfiguration{
+			Priority:     sub.Priority,
+			Description:  sub.Description,
+			Tags:         sub.Tags,
+			CustomFields: map[string]any{},
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("encode task configuration: %w", err)
+		}
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO tasks (project_id, title, status, assigned_to, configuration)
+			VALUES ($1::uuid, $2, $3, '{}', $4::jsonb)
+			RETURNING id::text`,
+			parent.ProjectID, sub.Title, StatusTodo, configuration,
+		).Scan(&ids[i]); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Intra-batch edges: map indices onto the just-created IDs.
+	dependedOn := map[int]bool{}
+	for i, sub := range subs {
+		deps := make([]string, len(sub.DependsOn))
+		for j, d := range sub.DependsOn {
+			deps[j] = ids[d]
+			dependedOn[d] = true
+		}
+		if err := insertDependencies(ctx, tx, ids[i], deps); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// The parent's new dependencies: terminal subtasks (nothing in the
+	// batch depends on them). Transitivity makes depending on all subtasks
+	// redundant; every non-empty DAG has at least one terminal.
+	existing := map[string]bool{}
+	for _, d := range parent.Dependencies {
+		existing[d] = true
+	}
+	added := []string{}
+	for i := range subs {
+		if !dependedOn[i] && !existing[ids[i]] {
+			added = append(added, ids[i])
+		}
+	}
+	newParentDeps := append(append([]string{}, parent.Dependencies...), added...)
+	// Belt and braces: the children can only reach other children, so this
+	// passes — but it re-runs the DB cycle walker over the post-insert
+	// graph inside the same transaction, guarding future refactors.
+	if err := validateDependencies(ctx, tx, parentID, parent.ProjectID, newParentDeps); err != nil {
+		return nil, nil, err
+	}
+	if err := insertDependencies(ctx, tx, parentID, added); err != nil {
+		return nil, nil, err
+	}
+
+	// Re-scan each created task so event payloads and the response carry
+	// full tasks including their dependency lists; record task.created
+	// events in creation order, then the parent's dependencies_changed
+	// last, so replaying clients see the subtasks before the parent's dep
+	// list references them.
+	created := make([]*Task, len(subs))
+	events := make([]StoredEvent, 0, len(subs)+1)
+	for i, id := range ids {
+		t, err := scanTask(tx.QueryRow(ctx, taskSelectBase+` WHERE t.id = $1::uuid GROUP BY t.id`, id))
+		if err != nil {
+			return nil, nil, err
+		}
+		created[i] = t
+		ev, err := recordEvent(ctx, tx, parent.ProjectID, EventTaskCreated, TaskCreatedPayload{Task: t}, actor)
+		if err != nil {
+			return nil, nil, err
+		}
+		events = append(events, ev)
+	}
+	ev, err := recordEvent(ctx, tx, parent.ProjectID, EventTaskDependenciesChanged, TaskDependenciesChangedPayload{TaskID: parentID, DependsOn: newParentDeps}, actor)
+	if err != nil {
+		return nil, nil, err
+	}
+	events = append(events, ev)
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return created, events, nil
+}
+
 // insertDependencies must run inside the same transaction as the
 // validation that approved deps, so the two can't race against a
 // concurrent change to the dependency graph.

@@ -7,6 +7,8 @@
 import type * as gen from './generated/api'
 
 export type {
+  BreakdownResponse,
+  BreakdownSuggestion,
   Comment,
   CommentDeletedPayload,
   PresenceEntry,
@@ -42,6 +44,12 @@ export interface CommentAddedPayload {
 }
 export interface ProjectUpdatedPayload {
   changes: Partial<Pick<gen.Project, 'name' | 'description' | 'metadata'>>
+}
+
+// Refinement: Go's []*Task generates as (Task | undefined)[]; the server
+// never returns nil entries.
+export interface BreakdownApplyResponse {
+  created: Task[]
 }
 
 // The WS wire envelope (see models.go Event) — durable domain events use

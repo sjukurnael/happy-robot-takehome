@@ -14,6 +14,7 @@ import (
 type API struct {
 	store *Store
 	hub   *Hub
+	ai    *AIClient
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -38,7 +39,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrSelfDependency),
 		errors.Is(err, ErrCyclicDependency),
 		errors.Is(err, ErrDependencyNotFound),
-		errors.Is(err, ErrCrossProjectDependency):
+		errors.Is(err, ErrCrossProjectDependency),
+		errors.Is(err, ErrInvalidBatch):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		// Unexpected errors are logged server-side but never echoed to the
@@ -245,6 +247,65 @@ func (a *API) deleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 	a.broadcastEvents(events)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- AI breakdown ---
+
+// breakdownTask asks Claude to propose subtasks for a task. Pure read:
+// nothing is persisted — the client shows the suggestions in a review
+// modal and only the apply endpoint below mutates. Degrades to 503 with a
+// clear message when no ANTHROPIC_API_KEY is configured.
+func (a *API) breakdownTask(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "taskID")
+	task, err := a.store.GetTask(r.Context(), id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	siblings, err := a.store.ListTasksByProject(r.Context(), task.ProjectID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	titles := make([]string, 0, len(siblings))
+	for _, s := range siblings {
+		if s.ID != task.ID {
+			titles = append(titles, s.Title)
+		}
+	}
+	suggestions, err := a.ai.BreakdownTask(r.Context(), task, titles)
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrAINotConfigured), errors.Is(err, ErrAIUnavailable):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	case errors.Is(err, ErrAIBadOutput):
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	default:
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, BreakdownResponse{Suggestions: suggestions})
+}
+
+// applyBreakdown creates the reviewed subtasks atomically. Deliberately
+// AI-free: it works without an API key, and the body is validated from
+// scratch (the client could send anything, not just what Claude proposed).
+func (a *API) applyBreakdown(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "taskID")
+	var req BreakdownApplyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	created, events, err := a.store.CreateTaskBatch(r.Context(), id, req.Subtasks, actorFrom(r))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	a.broadcastEvents(events)
+	writeJSON(w, http.StatusCreated, BreakdownApplyResponse{Created: created})
 }
 
 // --- Comments ---

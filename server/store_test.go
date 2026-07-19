@@ -454,3 +454,143 @@ func TestProjectStats(t *testing.T) {
 		t.Errorf("assignees = %v, want alice+bob deduped", st.Assignees)
 	}
 }
+
+// --- AI breakdown batch ---
+
+func TestCreateTaskBatchMapsIndicesAndSetsFinishLine(t *testing.T) {
+	ctx := context.Background()
+	p := mustCreateProject(t, "batch")
+	pre := mustCreateTask(t, p.ID, "pre-existing dep", nil)
+	parent := mustCreateTask(t, p.ID, "big task", []string{pre.ID})
+	seqBefore := projectLastSeq(t, p.ID)
+
+	created, events, err := testStore.CreateTaskBatch(ctx, parent.ID, []BreakdownSuggestion{
+		{Title: "A", Priority: "high", Tags: []string{"x"}},
+		{Title: "B"},
+		{Title: "C", DependsOn: []int{0, 1}},
+	}, "ai-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(created) != 3 {
+		t.Fatalf("created %d tasks, want 3", len(created))
+	}
+
+	// C's index deps mapped onto A and B's new UUIDs.
+	wantDeps := map[string]bool{created[0].ID: true, created[1].ID: true}
+	if len(created[2].Dependencies) != 2 || !wantDeps[created[2].Dependencies[0]] || !wantDeps[created[2].Dependencies[1]] {
+		t.Errorf("C.Dependencies = %v, want A+B ids", created[2].Dependencies)
+	}
+	if created[0].Configuration.Priority != "high" || created[0].Configuration.Tags[0] != "x" {
+		t.Errorf("configuration not carried: %#v", created[0].Configuration)
+	}
+
+	// Parent keeps its pre-existing dep and gains only the terminal C —
+	// nothing in the batch depends on C, while A and B are covered
+	// transitively through it.
+	got, err := testStore.GetTask(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDeps := map[string]bool{}
+	for _, d := range got.Dependencies {
+		gotDeps[d] = true
+	}
+	if len(got.Dependencies) != 2 || !gotDeps[pre.ID] || !gotDeps[created[2].ID] {
+		t.Errorf("parent deps = %v, want [pre, C]", got.Dependencies)
+	}
+
+	// 3 task.created in creation order, then the parent's
+	// dependencies_changed, with gapless consecutive seqs.
+	if len(events) != 4 {
+		t.Fatalf("got %d events, want 4", len(events))
+	}
+	for i, ev := range events {
+		if ev.Seq != seqBefore+int64(i)+1 {
+			t.Errorf("event %d seq = %d, want %d", i, ev.Seq, seqBefore+int64(i)+1)
+		}
+		if i < 3 && ev.EventType != EventTaskCreated {
+			t.Errorf("event %d type = %s, want task.created", i, ev.EventType)
+		}
+	}
+	if events[3].EventType != EventTaskDependenciesChanged {
+		t.Errorf("last event type = %s, want task.dependencies_changed", events[3].EventType)
+	}
+	var depPayload TaskDependenciesChangedPayload
+	if err := json.Unmarshal(events[3].Payload, &depPayload); err != nil {
+		t.Fatal(err)
+	}
+	if depPayload.TaskID != parent.ID || len(depPayload.DependsOn) != 2 {
+		t.Errorf("dependencies_changed payload = %+v, want parent with 2 deps", depPayload)
+	}
+	if projectLastSeq(t, p.ID) != seqBefore+4 {
+		t.Errorf("lastSeq = %d, want %d", projectLastSeq(t, p.ID), seqBefore+4)
+	}
+}
+
+func TestCreateTaskBatchAtomicity(t *testing.T) {
+	ctx := context.Background()
+	p := mustCreateProject(t, "batch-atomic")
+	parent := mustCreateTask(t, p.ID, "parent", nil)
+	seqBefore := projectLastSeq(t, p.ID)
+
+	cases := map[string][]BreakdownSuggestion{
+		"empty batch":        {},
+		"out-of-range index": {{Title: "A", DependsOn: []int{5}}},
+		"self dependency":    {{Title: "A", DependsOn: []int{0}}},
+		"empty title":        {{Title: "   "}},
+		"cycle":              {{Title: "A", DependsOn: []int{1}}, {Title: "B", DependsOn: []int{0}}},
+	}
+	for name, subs := range cases {
+		if _, _, err := testStore.CreateTaskBatch(ctx, parent.ID, subs, "test"); !errors.Is(err, ErrInvalidBatch) {
+			t.Errorf("%s: err = %v, want ErrInvalidBatch", name, err)
+		}
+	}
+
+	tasks, err := testStore.ListTasksByProject(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("task count = %d after failed batches, want 1", len(tasks))
+	}
+	if got := projectLastSeq(t, p.ID); got != seqBefore {
+		t.Errorf("lastSeq = %d after failed batches, want %d (no burned seqs)", got, seqBefore)
+	}
+}
+
+func TestCreateTaskBatchParentNotFound(t *testing.T) {
+	_, _, err := testStore.CreateTaskBatch(context.Background(), "00000000-0000-0000-0000-000000000000",
+		[]BreakdownSuggestion{{Title: "A"}}, "test")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCreateTaskBatchFinishLineBlocksParentCompletion(t *testing.T) {
+	ctx := context.Background()
+	p := mustCreateProject(t, "batch-finish-line")
+	parent := mustCreateTask(t, p.ID, "parent", nil)
+
+	created, _, err := testStore.CreateTaskBatch(ctx, parent.ID, []BreakdownSuggestion{
+		{Title: "step 1"},
+		{Title: "step 2", DependsOn: []int{0}},
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := StatusDone
+	if _, _, err := testStore.UpdateTask(ctx, parent.ID, TaskPatch{Status: &done}, "test"); !errors.Is(err, ErrBlockedByDependency) {
+		t.Fatalf("completing parent: err = %v, want ErrBlockedByDependency", err)
+	}
+	// step 2 is itself blocked until step 1 is done.
+	if _, _, err := testStore.UpdateTask(ctx, created[1].ID, TaskPatch{Status: &done}, "test"); !errors.Is(err, ErrBlockedByDependency) {
+		t.Fatalf("completing step 2 early: err = %v, want ErrBlockedByDependency", err)
+	}
+	mustUpdateStatus(t, created[0].ID, StatusDone)
+	mustUpdateStatus(t, created[1].ID, StatusDone)
+	if _, _, err := testStore.UpdateTask(ctx, parent.ID, TaskPatch{Status: &done}, "test"); err != nil {
+		t.Fatalf("completing parent after subtasks: %v", err)
+	}
+}
