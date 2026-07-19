@@ -4,7 +4,7 @@ DB_URL = postgres://app:app@localhost:5432/taskman?sslmode=disable
 MIGRATE_IMG = migrate/migrate:v4.17.1
 MIGRATIONS_DIR = $(CURDIR)/server/migrations
 
-.PHONY: up down db-up db-migrate db-seed db-reset db-psql
+.PHONY: up down test db-up db-migrate db-seed db-reset db-psql
 
 # Full stack in Docker: Postgres + migrations + Go server + built frontend.
 up:
@@ -13,6 +13,12 @@ up:
 
 down:
 	$(COMPOSE) --profile app down
+
+# Integration tests for the store/validation/event-log guarantees. They run
+# against a dedicated taskman_test database (created and migrated by the
+# suite itself), so dev data is never touched.
+test: db-up
+	cd server && go test ./...
 
 db-up:
 	$(COMPOSE) up -d --wait db

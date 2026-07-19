@@ -12,6 +12,8 @@ Collaborative task management system with near-real-time sync across clients.
 - [Technology choices](#technology-choices)
 - [Database](#database)
 - [Sync: the event log](#sync-the-event-log)
+- [Caching, rate limiting, and backpressure](#caching-rate-limiting-and-backpressure)
+- [Testing](#testing)
 - [How I'd scale it over time](#how-id-scale-it-over-time)
 - [Tradeoffs](#tradeoffs)
 - [Running locally (native dev)](#running-locally-native-dev)
@@ -48,6 +50,8 @@ path. For hacking on the code itself, see
 │   ├── validation.go            # dependency cycle / cross-project / completion checks
 │   ├── events.go                 # event type constants, payload structs, recordEvent, ListEventsSince
 │   ├── handlers.go                # HTTP handlers: decode request -> call store -> broadcast -> respond
+│   ├── ratelimit.go                # per-caller token bucket on mutating requests
+│   ├── store_test.go               # integration tests: validation, event-log atomicity, concurrency
 │   ├── hub.go                      # WebSocket registry, presence, event broadcast + subscribe-time replay
 │   ├── migrations/0001_init.{up,down}.sql   # schema (golang-migrate)
 │   └── seed/seed.sql                          # demo projects/tasks/comments
@@ -93,7 +97,10 @@ cross-project references, "can't complete while blocked"), and — through
 presence ("who's viewing what," driven by the client's `viewing` messages),
 broadcasts durable events to every connected client after their transaction
 commits, and — when a client subscribes to a project — replays anything
-that client missed directly to its connection first.
+that client missed directly to its connection first. Each connection has
+its own buffered send queue drained by a dedicated writer goroutine (with
+write deadlines and ping/pong keepalive) — see
+[Caching, rate limiting, and backpressure](#caching-rate-limiting-and-backpressure).
 
 ### Frontend
 
@@ -129,10 +136,11 @@ JSON.
 | GET | `/ws` | WebSocket upgrade |
 | GET | `/projects/` | list projects |
 | POST | `/projects/` | create project |
+| GET | `/projects/stats` | per-project dashboard aggregates (task/done/blocked counts, assignees, last edited) in one SQL pass |
 | GET | `/projects/{projectID}/` | get one project (includes `lastSeq`) |
 | PATCH | `/projects/{projectID}/` | update name/description/metadata |
 | DELETE | `/projects/{projectID}/` | delete a project and everything under it |
-| GET | `/projects/{projectID}/tasks` | list a project's tasks |
+| GET | `/projects/{projectID}/tasks` | list a project's tasks (ETag'd by `lastSeq` — unchanged projects answer 304, see [caching](#caching-rate-limiting-and-backpressure)) |
 | POST | `/projects/{projectID}/tasks` | create a task |
 | GET | `/projects/{projectID}/events?after=&limit=` | catch-up: events since `after`, capped at `limit` (max 500) |
 | GET | `/tasks/{taskID}/` | get one task |
@@ -296,6 +304,69 @@ TODO in `server/hub.go` (`replayTo`) and `client/src/ProjectDetail.tsx`
 (`fillGap`), since ordinary reconnect gaps are small and `ListEventsSince`
 caps a single query at 500 rows regardless.
 
+## Caching, rate limiting, and backpressure
+
+**HTTP caching via the event log.** `last_seq` is bumped by every mutation
+in a project, atomically, in the same transaction — which makes it a
+version stamp for the whole project. The tasks-list endpoint exploits
+that: it returns `ETag: "<lastSeq>"` with `Cache-Control: no-cache`, so
+the browser revalidates on every fetch and an unchanged project answers a
+bodyless **304** — the client transparently reuses its cached copy. A
+large task list only crosses the wire when something actually changed,
+with zero client-side code and no cache-invalidation machinery: the sync
+design's sequence counter *is* the invalidation key. (The dashboard
+doesn't even need that: `GET /api/projects/stats` computes its stat cards
+in one SQL pass server-side, so the project list never downloads task
+lists at all.)
+
+**Rate limiting** (`server/ratelimit.go`). Mutating requests pass through
+a per-caller token bucket (15/s, burst 30 — far above human click rates).
+This matters here specifically because of two amplification effects: every
+mutation takes the project row lock that serializes all writers to that
+project, and every mutation fans out over WebSocket to all connected
+clients — so one runaway client (a PATCH loop from a buggy effect, say)
+would tax everyone. Over-limit requests get a 429, which the frontend
+already surfaces through its normal error path. Reads are never throttled:
+they're cheap, cacheable, and gap-filling depends on them.
+
+**WebSocket backpressure** (`server/hub.go`). Each connection has a
+bounded send queue drained by its own writer goroutine — the sole writer
+to that socket, with a deadline on every write. Broadcasts enqueue and
+never block: a client whose queue fills (a slow or stalled reader) is
+disconnected rather than allowed to wedge the broadcast for everyone else.
+Dropping it is safe *because of* the event log: on reconnect it re-sends
+`viewing` with its `lastSeq` and the server replays exactly what it
+missed. Dead connections are detected by ping/pong keepalive (30s pings,
+60s read deadline), so ghost entries can't linger in presence rosters.
+
+## Testing
+
+```sh
+make test    # brings up Postgres, then runs the Go suite
+```
+
+Integration tests (`server/store_test.go`) run against a real Postgres —
+the suite creates and migrates its own `taskman_test` database, so dev
+data is never touched, and it skips loudly (without failing the build) if
+Postgres isn't running. They cover the properties that live in the
+database rather than in Go, which unit tests with mocks couldn't
+meaningfully exercise:
+
+- **Event-log atomicity:** every mutation emits its event(s) with
+  contiguous seqs; a *failed* mutation (e.g. a rejected dependency) burns
+  no seq and leaves no event row.
+- **Concurrency:** 25 goroutines creating tasks in one project produce a
+  strictly gapless 1..25 sequence — the row-lock serialization the whole
+  sync model rests on.
+- **Dependency validation:** self/missing/cross-project/cycle rejection,
+  and "can't complete while a dependency is incomplete."
+- **Cascades and cleanup:** deleting a task reports which other tasks
+  lost a dependency; deleting a project takes its tasks, comments, and
+  events with it.
+- **Contract details:** metadata/JSONB roundtrips, minimal `task.updated`
+  payloads, one-PATCH-two-events for scalar+dependency changes, catch-up
+  pagination, and the stats aggregates.
+
 ## How I'd scale it over time
 
 Roughly in the order the bottlenecks would appear:
@@ -316,15 +387,19 @@ Roughly in the order the bottlenecks would appear:
    compaction** — events older than the oldest snapshot any client could
    need can be archived or dropped.
 3. **Pagination.** Task lists and comment threads are currently fetched
-   whole. At "2MB+ project" scale, cursor pagination on
+   whole (though the ETag revalidation means an unchanged list is never
+   re-shipped, and the dashboard already gets aggregates instead of
+   tasks). At "2MB+ project" scale, cursor pagination on
    `(project_id, created_at, id)` for tasks and comments, with the board
    lazily loading per column. The event-log design is what makes this
    cheap to add: clients already apply deltas, so a paginated initial load
    doesn't change the sync path at all.
-4. **Backpressure.** Per-connection buffered send queues in the hub; a
-   client that can't drain its queue gets disconnected and resyncs via the
-   normal reconnect path, instead of one slow reader wedging a broadcast.
-   Rate limiting on mutations (per client ID) at the same layer.
+4. **Sharper backpressure and quotas.** The basics are in (bounded
+   per-connection send queues with slow-consumer disconnect; per-caller
+   token buckets on mutations — see
+   [above](#caching-rate-limiting-and-backpressure)). The next steps are
+   authenticated per-user quotas instead of per-IP, and rate limits on
+   inbound WS messages (presence updates) as well as HTTP.
 5. **Database growth.** The existing indexes cover the hot paths
    (`tasks(project_id)`, `events(project_id, seq)`). Beyond that: read
    replicas for the list/snapshot endpoints, then partitioning `events` by
@@ -346,10 +421,11 @@ Roughly in the order the bottlenecks would appear:
   cost/benefit; a CRDT would only pay off for collaborative long-text
   editing.
 - **Dashboard refetches instead of applying deltas.** `ProjectList`
-  refetches stats on any task event — an N+1 that's simple and fine at
-  this scale, in contrast to the board, which is fully delta-driven.
-  Comment threads similarly refetch the open thread on comment events;
-  the payloads are tiny.
+  refetches on any task event, in contrast to the board, which is fully
+  delta-driven. What it refetches is two small responses (the project
+  list and the `/projects/stats` aggregates — never task lists), so the
+  simplicity costs little. Comment threads similarly refetch the open
+  thread on comment events; the payloads are tiny.
 - **Hand-mirrored TS types, not a generated contract.** `types.ts` is kept
   in sync with the Go structs by discipline. At this size that's fine;
   with more surface area I'd generate the contract (OpenAPI or tygo) so it
