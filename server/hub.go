@@ -38,31 +38,8 @@ func newID(prefix string) string {
 	return fmt.Sprintf("%s_%s", prefix, uuid.NewString())
 }
 
-// PresenceEntry describes one connected client's current location for
-// "who's viewing what" indicators.
-type PresenceEntry struct {
-	ClientID string `json:"clientId"`
-	Name     string `json:"name"`
-	TaskID   string `json:"taskId,omitempty"`
-}
-
-// Event is the outbound WS envelope. Durable, sequenced domain events
-// (task.*, comment.*, project.updated) use Type "event", with the actual
-// domain type in EventType and Seq/Payload/Actor populated from the
-// events table row. presence.updated, project.created, and
-// project.deleted (all intentionally outside the per-project event log —
-// see events.go) keep their own simpler shapes, using Type directly and
-// Presence/ProjectID.
-type Event struct {
-	Type       string          `json:"type"` // "event" | "presence.updated" | "project.created" | "project.deleted"
-	ProjectID  string          `json:"projectId,omitempty"`
-	ResourceID string          `json:"resourceId,omitempty"` // only used by the thin project.created/deleted notifications
-	Seq        int64           `json:"seq,omitempty"`
-	EventType  string          `json:"eventType,omitempty"`
-	Payload    json.RawMessage `json:"payload,omitempty"`
-	Actor      string          `json:"actor,omitempty"`
-	Presence   []PresenceEntry `json:"presence,omitempty"`
-}
+// PresenceEntry and Event (the outbound WS envelope) live in models.go
+// with the rest of the wire contract.
 
 type wsClient struct {
 	conn      *websocket.Conn

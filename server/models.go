@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Project struct {
 	ID          string         `json:"id"`
@@ -49,4 +52,60 @@ type Comment struct {
 	Content   string    `json:"content"`
 	Author    string    `json:"author"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+// ProjectPatch and TaskPatch are the PATCH request bodies. Nil means "field
+// not present, leave it alone" — which is what makes field-granularity
+// updates possible (see README: last-write-wins per field, not per record).
+type ProjectPatch struct {
+	Name        *string        `json:"name"`
+	Description *string        `json:"description"`
+	Metadata    map[string]any `json:"metadata"`
+}
+
+type TaskPatch struct {
+	Title         *string            `json:"title"`
+	Status        *TaskStatus        `json:"status"`
+	AssignedTo    []string           `json:"assignedTo"`
+	Configuration *TaskConfiguration `json:"configuration"`
+	Dependencies  []string           `json:"dependencies"`
+}
+
+// ProjectStats is the dashboard's per-project aggregate — computed in one
+// SQL pass instead of shipping every task of every project to the client.
+// "Blocked" mirrors client/src/taskUtils.ts exactly: a task counts as
+// blocked when any of its dependencies is not done.
+type ProjectStats struct {
+	ProjectID  string    `json:"projectId"`
+	Total      int       `json:"total"`
+	Done       int       `json:"done"`
+	Blocked    int       `json:"blocked"`
+	Assignees  []string  `json:"assignees"`
+	LastEdited time.Time `json:"lastEdited"`
+}
+
+// PresenceEntry describes one connected client's current location for
+// "who's viewing what" indicators.
+type PresenceEntry struct {
+	ClientID string `json:"clientId"`
+	Name     string `json:"name"`
+	TaskID   string `json:"taskId,omitempty"`
+}
+
+// Event is the outbound WS envelope. Durable, sequenced domain events
+// (task.*, comment.*, project.updated) use Type "event", with the actual
+// domain type in EventType and Seq/Payload/Actor populated from the
+// events table row. presence.updated, project.created, and
+// project.deleted (all intentionally outside the per-project event log —
+// see events.go) keep their own simpler shapes, using Type directly and
+// Presence/ProjectID.
+type Event struct {
+	Type       string          `json:"type"` // "event" | "presence.updated" | "project.created" | "project.deleted"
+	ProjectID  string          `json:"projectId,omitempty"`
+	ResourceID string          `json:"resourceId,omitempty"` // only used by the thin project.created/deleted notifications
+	Seq        int64           `json:"seq,omitempty"`
+	EventType  string          `json:"eventType,omitempty"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
+	Actor      string          `json:"actor,omitempty"`
+	Presence   []PresenceEntry `json:"presence,omitempty"`
 }

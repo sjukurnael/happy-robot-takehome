@@ -4,7 +4,7 @@ DB_URL = postgres://app:app@localhost:5432/taskman?sslmode=disable
 MIGRATE_IMG = migrate/migrate:v4.17.1
 MIGRATIONS_DIR = $(CURDIR)/server/migrations
 
-.PHONY: up down test db-up db-migrate db-seed db-reset db-psql
+.PHONY: up down test gen-types db-up db-migrate db-seed db-reset db-psql
 
 # Full stack in Docker: Postgres + migrations + Go server + built frontend.
 up:
@@ -19,6 +19,12 @@ down:
 # suite itself), so dev data is never touched.
 test: db-up
 	cd server && go test ./...
+
+# Regenerate the TypeScript side of the API contract from the Go structs
+# (server/tygo.yaml -> client/src/generated/api.ts). Run after changing
+# any type in server/models.go or server/events.go.
+gen-types:
+	cd server && go tool tygo generate
 
 db-up:
 	$(COMPOSE) up -d --wait db

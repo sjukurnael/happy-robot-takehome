@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -36,12 +35,6 @@ type querier interface {
 }
 
 // --- Projects ---
-
-type ProjectPatch struct {
-	Name        *string        `json:"name"`
-	Description *string        `json:"description"`
-	Metadata    map[string]any `json:"metadata"`
-}
 
 func scanProject(row pgx.Row) (*Project, error) {
 	p := &Project{}
@@ -158,19 +151,6 @@ func (s *Store) UpdateProject(ctx context.Context, id string, patch ProjectPatch
 	return updated, events, nil
 }
 
-// ProjectStats is the dashboard's per-project aggregate — computed in one
-// SQL pass instead of shipping every task of every project to the client.
-// "Blocked" mirrors client/src/taskUtils.ts exactly: a task counts as
-// blocked when any of its dependencies is not done.
-type ProjectStats struct {
-	ProjectID  string    `json:"projectId"`
-	Total      int       `json:"total"`
-	Done       int       `json:"done"`
-	Blocked    int       `json:"blocked"`
-	Assignees  []string  `json:"assignees"`
-	LastEdited time.Time `json:"lastEdited"`
-}
-
 func (s *Store) ListProjectStats(ctx context.Context) ([]*ProjectStats, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT p.id::text,
@@ -215,14 +195,6 @@ func (s *Store) DeleteProject(ctx context.Context, id string) error {
 }
 
 // --- Tasks ---
-
-type TaskPatch struct {
-	Title         *string            `json:"title"`
-	Status        *TaskStatus        `json:"status"`
-	AssignedTo    []string           `json:"assignedTo"`
-	Configuration *TaskConfiguration `json:"configuration"`
-	Dependencies  []string           `json:"dependencies"`
-}
 
 const taskSelectBase = `
 	SELECT t.id::text, t.project_id::text, t.title, t.status, t.assigned_to, t.configuration,

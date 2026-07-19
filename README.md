@@ -45,7 +45,8 @@ path. For hacking on the code itself, see
 │   ├── Dockerfile           # multi-stage build for the full-stack compose profile
 │   ├── main.go              # entrypoint: DB pool, router, route table
 │   ├── db.go                 # pgxpool connection + startup health check
-│   ├── models.go              # Project / Task / Comment structs — the JSON API contract
+│   ├── models.go              # the wire contract: domain structs, patches, stats, WS envelope
+│   ├── tygo.yaml               # config for generating the TS side of that contract (make gen-types)
 │   ├── store.go                # all Postgres reads/writes; the only file that writes SQL
 │   ├── validation.go            # dependency cycle / cross-project / completion checks
 │   ├── events.go                 # event type constants, payload structs, recordEvent, ListEventsSince
@@ -60,7 +61,8 @@ path. For hacking on the code itself, see
 │   └── nginx.conf           # serves the SPA, proxies /api and /ws to the server
 └── client/src/              # React frontend
     ├── main.tsx, App.tsx     # entry point + top-level view switch (project list <-> project board)
-    ├── types.ts                # TS mirror of the Go JSON contract, including event payload shapes
+    ├── generated/api.ts        # GENERATED from the Go structs via tygo — the structural API contract
+    ├── types.ts                # re-exports generated/api.ts + refinements Go can't express (unions)
     ├── api.ts                   # typed fetch wrapper for the REST API
     ├── live.ts                    # the single shared WebSocket connection for the whole tab
     ├── identity.ts                 # per-tab display name/clientId (sessionStorage), avatar colors
@@ -195,8 +197,13 @@ Server → client:
   server-rendering requirement — it's an app behind a login in any real
   deployment — so Next.js would add moving parts without buying anything.
   The interesting frontend logic (event application, gap detection) is
-  plain TypeScript, mirrored 1:1 from the Go payload structs in
-  `types.ts`.
+  plain TypeScript, typed against a contract **generated from the Go
+  structs** — `server/models.go` and `server/events.go` are the single
+  source of truth, and `make gen-types` (tygo) emits
+  `client/src/generated/api.ts` from them, so the two sides can't silently
+  drift. `types.ts` re-exports the generated contract and adds only what
+  Go's type system can't express: the closed `TaskStatus` union and
+  precise per-event payload shapes.
 - **dnd-kit** for drag-and-drop: small, headless, and doesn't fight the
   optimistic-update flow.
 
@@ -426,10 +433,13 @@ Roughly in the order the bottlenecks would appear:
   list and the `/projects/stats` aggregates — never task lists), so the
   simplicity costs little. Comment threads similarly refetch the open
   thread on comment events; the payloads are tiny.
-- **Hand-mirrored TS types, not a generated contract.** `types.ts` is kept
-  in sync with the Go structs by discipline. At this size that's fine;
-  with more surface area I'd generate the contract (OpenAPI or tygo) so it
-  can't drift.
+- **Model types are generated; route wiring is hand-typed.** The
+  structural contract (every struct, field name, and payload shape) is
+  generated from the Go source via tygo, so it can't drift. What remains
+  hand-written is the route wiring in `api.ts` — which endpoint returns
+  which type. At 16 endpoints that's easy to eyeball; with more surface
+  area (or more clients) I'd move up to OpenAPI so the routes themselves
+  are part of the machine-checked contract and the docs come for free.
 - **No auth.** Identity is a self-chosen display name per tab
   (`sessionStorage`) — the right scope for demonstrating sync, and the
   `X-Actor` header/actor column is where a real authenticated principal

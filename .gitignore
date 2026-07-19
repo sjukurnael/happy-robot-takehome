@@ -7,3 +7,4 @@ client/dist/
 .env.local
 *.log
 .DS_Store
+VIDEO_SCRIPT.md
