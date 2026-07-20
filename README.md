@@ -68,29 +68,12 @@ path. For hacking on the code itself, see
 │   ├── hub.go                           # WebSocket registry, presence, event broadcast + subscribe-time replay
 │   ├── migrations/0001_init.{up,down}.sql   # schema (golang-migrate)
 │   └── seed/seed.sql                          # demo projects/tasks/comments
-├── client/
-│   ├── Dockerfile           # build + nginx image for the full-stack compose profile
-│   ├── nginx.conf            # serves the SPA, proxies /api and /ws to the server
-│   ├── playwright.config.ts   # e2e runner config (expects the stack at :3000)
-│   └── e2e/                    # Playwright suite: lifecycle, two-browser sync, reconnect replay
-└── client/src/              # React frontend (pure helpers have Vitest tests alongside: *.test.ts)
-    ├── main.tsx, App.tsx     # entry point + top-level view switch (project list <-> project board)
-    ├── generated/api.ts        # GENERATED from the Go structs via tygo — the structural API contract
-    ├── types.ts                # re-exports generated/api.ts + refinements Go can't express (unions)
-    ├── api.ts                   # typed fetch wrapper for the REST API
-    ├── live.ts                    # the single shared WebSocket connection for the whole tab
-    ├── identity.ts                 # per-tab display name/clientId (sessionStorage), avatar colors
-    ├── useWsEvents.ts                # React hooks over live.ts: raw events, presence, connection status
-    ├── ProjectList.tsx                 # project grid: search, create/delete, per-project stats
-    ├── ProjectDetail.tsx                 # board page — owns tasks/project state and the sync/gap-detection logic
-    ├── KanbanBoard.tsx, TaskCard.tsx       # drag-and-drop board (dnd-kit)
-    ├── TaskPanel.tsx                        # task detail side panel: fields, dependencies, comments
-    ├── BreakdownModal.tsx                    # AI breakdown review dialog (suggest -> review -> apply)
-    ├── NewTaskForm.tsx                       # task creation modal
-    ├── Presence.tsx, Avatar.tsx,
-    │   IdentityBadge.tsx                      # "who's here" UI (viewer avatars, rename-yourself badge)
-    ├── taskUtils.ts, format.ts                 # small pure helpers (blocked-task check, relative timestamps)
-    └── ThemeToggle.tsx                           # light/dark toggle
+└── client/                 # React frontend (Vite + TypeScript)
+    ├── Dockerfile, nginx.conf       # build + nginx image for the compose profile (proxies /api and /ws)
+    ├── playwright.config.ts, e2e/   # Playwright e2e suite (see Testing)
+    └── src/                         # components, hooks, api client — walked through in
+                                     # "Frontend" below. src/generated/api.ts is GENERATED
+                                     # from the Go structs (make gen-types); *.test.ts are unit tests
 ```
 
 ### Backend
