@@ -90,7 +90,7 @@ export async function createTaskViaUI(
   if (opts.description) await page.locator('.modal textarea').fill(opts.description)
   if (opts.tags) await page.getByPlaceholder('frontend, urgent').fill(opts.tags)
   for (const dep of opts.dependsOn ?? []) {
-    await page.locator('.dep-toggle-chip', { hasText: dep }).click()
+    await page.locator('.modal .dep-picker-option', { hasText: dep }).click()
   }
   await page.getByRole('button', { name: 'Create task' }).click()
   await expect(taskCard(page, title)).toBeVisible()
