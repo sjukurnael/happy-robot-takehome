@@ -1198,3 +1198,21 @@
   font-size: 12px;
   color: var(--text-faint);
 }
+
+.dep-picker-search {
+  /* Pinned to the top of the picker while the options scroll under it —
+     .dep-picker is the scroll container, so sticky resolves against it. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: none;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+}

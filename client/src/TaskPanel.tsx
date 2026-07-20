@@ -38,6 +38,7 @@ export function TaskPanel({
   const [tags, setTags] = useState('')
   const [assignees, setAssignees] = useState('')
   const [depPickerOpen, setDepPickerOpen] = useState(false)
+  const [depQuery, setDepQuery] = useState('')
   const [breakdownOpen, setBreakdownOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -117,6 +118,7 @@ export function TaskPanel({
   function addDependency(depId: string) {
     saveField({ dependencies: [...task!.dependencies, depId] })
     setDepPickerOpen(false)
+    setDepQuery('')
   }
 
   async function handleAddComment(e: React.FormEvent) {
@@ -152,6 +154,9 @@ export function TaskPanel({
     .filter(Boolean)
   const depTasks = task.dependencies.map((id) => tasks.find((t) => t.id === id)).filter((t): t is Task => !!t)
   const candidateDeps = tasks.filter((t) => t.id !== task.id && !task.dependencies.includes(t.id))
+  const visibleDeps = candidateDeps.filter((t) =>
+    t.title.toLowerCase().includes(depQuery.trim().toLowerCase()),
+  )
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -267,7 +272,13 @@ export function TaskPanel({
         <div className="field">
           <div className="field-label-row">
             <span>Dependencies</span>
-            <button type="button" onClick={() => setDepPickerOpen((v) => !v)}>
+            <button
+              type="button"
+              onClick={() => {
+                setDepPickerOpen((v) => !v)
+                setDepQuery('')
+              }}
+            >
               + add
             </button>
           </div>
@@ -288,12 +299,25 @@ export function TaskPanel({
           </div>
           {depPickerOpen && (
             <div className="dep-picker">
-              {candidateDeps.length === 0 && <p className="muted">No other tasks to depend on.</p>}
-              {candidateDeps.map((t) => (
-                <button type="button" key={t.id} className="dep-picker-option" onClick={() => addDependency(t.id)}>
-                  {t.title} <span className={`status-badge status-${t.status}`}>{STATUS_LABEL[t.status]}</span>
-                </button>
-              ))}
+              {candidateDeps.length === 0 ? (
+                <p className="muted">No other tasks to depend on.</p>
+              ) : (
+                <>
+                  <input
+                    className="dep-picker-search"
+                    autoFocus
+                    value={depQuery}
+                    onChange={(e) => setDepQuery(e.target.value)}
+                    placeholder="Search tasks…"
+                  />
+                  {visibleDeps.map((t) => (
+                    <button type="button" key={t.id} className="dep-picker-option" onClick={() => addDependency(t.id)}>
+                      {t.title} <span className={`status-badge status-${t.status}`}>{STATUS_LABEL[t.status]}</span>
+                    </button>
+                  ))}
+                  {visibleDeps.length === 0 && <p className="muted">No tasks match “{depQuery.trim()}”.</p>}
+                </>
+              )}
             </div>
           )}
         </div>
