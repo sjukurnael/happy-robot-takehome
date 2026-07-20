@@ -274,15 +274,6 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
           <button className="breadcrumb-link" onClick={onBack}>
             ← Projects
           </button>
-          <div className="tabs-row">
-            <span className="tab tab-active">Board</span>
-            <span className="tab tab-disabled" title="Not implemented yet">
-              Gantt
-            </span>
-            <span className="tab tab-disabled" title="Not implemented yet">
-              List
-            </span>
-          </div>
         </div>
         <div className="board-header-right">
           <span className={connected ? 'live-pill' : 'reconnecting-pill'}>

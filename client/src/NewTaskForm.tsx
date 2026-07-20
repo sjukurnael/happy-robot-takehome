@@ -25,8 +25,13 @@ export function NewTaskForm({
   const [description, setDescription] = useState('')
   const [tags, setTags] = useState('')
   const [dependencies, setDependencies] = useState<string[]>([])
+  const [depQuery, setDepQuery] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+
+  const visibleTasks = tasks.filter((t) =>
+    t.title.toLowerCase().includes(depQuery.trim().toLowerCase()),
+  )
 
   function toggleDependency(id: string) {
     setDependencies((deps) => (deps.includes(id) ? deps.filter((d) => d !== id) : [...deps, id]))
@@ -110,22 +115,31 @@ export function NewTaskForm({
             <div className="field-label-row">
               <span>Depends on</span>
             </div>
-            <div className="dependency-picker">
-              {tasks.map((t) => {
+            <div className="dep-picker">
+              <input
+                className="dep-picker-search"
+                value={depQuery}
+                onChange={(e) => setDepQuery(e.target.value)}
+                placeholder="Search tasks…"
+              />
+              {visibleTasks.map((t) => {
                 const selected = dependencies.includes(t.id)
                 return (
                   <button
                     type="button"
                     key={t.id}
-                    className={`dep-toggle-chip${selected ? ' selected' : ''}`}
+                    className={`dep-picker-option${selected ? ' selected' : ''}`}
                     onClick={() => toggleDependency(t.id)}
                   >
-                    {selected ? '✓ ' : ''}
-                    {t.title}
+                    <span>
+                      {selected ? '✓ ' : ''}
+                      {t.title}
+                    </span>
                     <span className={`status-badge status-${t.status}`}>{STATUS_LABEL[t.status]}</span>
                   </button>
                 )
               })}
+              {visibleTasks.length === 0 && <p className="muted">No tasks match “{depQuery.trim()}”.</p>}
             </div>
           </div>
         )}
